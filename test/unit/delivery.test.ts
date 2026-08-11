@@ -60,6 +60,110 @@ describe("delivery", () => {
 		expect(driver.enqueued(charge)).toEqual([{ cents: "500" }])
 	})
 
+	test("applies the unique key to the validated payload", async () => {
+		const driver = recordingDriver()
+
+		const charge = defineJob({
+			name: "billing.charge",
+			queue: "billing",
+			payload: type({ cents: "string.numeric.parse" }),
+			delivery: { unique: { key: (data) => `charge:${data.cents}`, mode: "keepFirst" } },
+		})
+
+		await createJobs({ driver }).enqueue(charge, { cents: "500" })
+
+		expect(driver.enqueued[0]?.delivery).toEqual({
+			...DELIVERY_DEFAULTS,
+			unique: { key: "charge:500", mode: "keepFirst" },
+		})
+	})
+
+	test("refuses keepLast without a window", async () => {
+		const rebuild = defineJob({
+			name: "search.rebuild",
+			queue: "search",
+			payload: type({ cents: "string.numeric.parse" }),
+			delivery: { unique: { key: () => "search", mode: "keepLast" } },
+		})
+
+		const failure = await createJobs({ driver: recordingDriver() })
+			.enqueue(rebuild, { cents: "500" })
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("keepLast")
+		expect((failure as Error).message).toContain("ttlMs")
+	})
+
+	test("holds a keepLast job for the window, keeping the longer of window and delay", async () => {
+		const driver = recordingDriver()
+
+		const shortDelay = defineJob({
+			name: "search.rebuild",
+			queue: "search",
+			payload: type({ cents: "string.numeric.parse" }),
+			delivery: {
+				delayMs: 1_000,
+				unique: { key: () => "search", mode: "keepLast", ttlMs: 4_000 },
+			},
+		})
+
+		const longDelay = defineJob({
+			name: "search.reindex",
+			queue: "search",
+			payload: type({ cents: "string.numeric.parse" }),
+			delivery: {
+				delayMs: 9_000,
+				unique: { key: () => "search", mode: "keepLast", ttlMs: 4_000 },
+			},
+		})
+
+		const jobs = createJobs({ driver })
+
+		await jobs.enqueue(shortDelay, { cents: "500" })
+		await jobs.enqueue(longDelay, { cents: "500" })
+
+		expect(driver.enqueued[0]?.delivery.delayMs).toBe(4_000)
+		expect(driver.enqueued[1]?.delivery.delayMs).toBe(9_000)
+	})
+
+	test("drops the window on noOverlap, which runs one job at a time instead", async () => {
+		const driver = recordingDriver()
+
+		const sync = defineJob({
+			name: "account.sync",
+			queue: "sync",
+			payload: type({ cents: "string.numeric.parse" }),
+			delivery: { unique: { key: () => "account", mode: "noOverlap", ttlMs: 4_000 } },
+		})
+
+		await createJobs({ driver }).enqueue(sync, { cents: "500" })
+
+		expect(driver.enqueued[0]?.delivery.unique).toEqual({ key: "account", mode: "noOverlap" })
+	})
+
+	test("keeps keepFirst without a window when the policy names none", async () => {
+		const driver = recordingDriver()
+
+		const welcome = defineJob({
+			name: "email.welcome",
+			queue: "mail",
+			payload: type({ cents: "string.numeric.parse" }),
+			delivery: { unique: { key: () => "ada", mode: "keepFirst" } },
+		})
+
+		await createJobs({ driver }).enqueue(welcome, { cents: "500" })
+
+		expect(Object.keys(driver.enqueued[0]?.delivery.unique ?? {})).toEqual(["mode", "key"])
+	})
+
+	test("a policy naming no unique leaves the key off the resolved delivery", async () => {
+		const driver = recordingDriver()
+
+		await createJobs({ driver }).enqueue(chargeCard, { cents: "500" })
+
+		expect(Object.keys(driver.enqueued[0]?.delivery ?? {})).not.toContain("unique")
+	})
+
 	test("a definition with no policy enqueues with the defaults", async () => {
 		const driver = recordingDriver()
 

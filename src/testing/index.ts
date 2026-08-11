@@ -44,7 +44,10 @@ export interface MemoryDriver extends JobDriver {
  * It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and
  * `keepFailedCount`, but only `attempts` reaches the handler, as `maxAttempts`.
  * `delayMs` is time-dependent, so it throws instead: test a delay against
- * `redisDriver`. Any delivery option outside the accepted set throws on enqueue
+ * `redisDriver`. `unique` throws for the same reason and one more — uniqueness
+ * is decided atomically inside Redis, and an inline imitation of it would agree
+ * with your test and disagree with production. Any delivery option outside the
+ * accepted set throws on enqueue
  * and names itself, so a behaviour this driver never learns to simulate fails
  * loudly instead of passing a test it would fail in production.
  *

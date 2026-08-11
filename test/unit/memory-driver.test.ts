@@ -114,6 +114,26 @@ describe("memoryDriver", () => {
 		expect(driver.enqueued(chargeCard)).toEqual([])
 	})
 
+	test("enqueue fails on a unique policy, which only a real queue enforces", async () => {
+		const driver = memoryDriver()
+
+		const failure = await driver
+			.enqueue({
+				queue: "billing",
+				envelope: { v: 1, name: "billing.charge", data: { cents: "500" }, origin: "direct" },
+				delivery: {
+					...DELIVERY_DEFAULTS,
+					unique: { mode: "keepFirst", key: "charge:500" },
+				} as Delivery,
+			})
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toBe(
+			'juibs: memoryDriver does not simulate "unique"; test that behaviour against redisDriver',
+		)
+		expect(driver.enqueued(chargeCard)).toEqual([])
+	})
+
 	test("drops a payload key holding undefined, the way Redis does", async () => {
 		const driver = memoryDriver()
 		const loose = defineJob({

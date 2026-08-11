@@ -1,5 +1,12 @@
-import { type ConnectionOptions, type JobsOptions, Queue, Worker, type WorkerOptions } from "bullmq"
-import type { Delivery } from "@/Delivery"
+import {
+	type ConnectionOptions,
+	type DeduplicationOptions,
+	type JobsOptions,
+	Queue,
+	Worker,
+	type WorkerOptions,
+} from "bullmq"
+import type { Delivery, ResolvedUnique } from "@/Delivery"
 import type { ConsumeRequest, JobDriver } from "@/Driver"
 
 const BLOCKING_CONNECTION_FIX =
@@ -31,14 +38,34 @@ export function assertBlockingConnection(connection: ConnectionOptions): void {
 	throw new Error(BLOCKING_CONNECTION_FIX)
 }
 
-function toJobsOptions(delivery: Delivery): JobsOptions {
-	const options: JobsOptions = {
+function toDeduplication(unique: ResolvedUnique): DeduplicationOptions {
+	if (unique.mode === "noOverlap") {
+		return { id: unique.key, keepLastIfActive: true }
+	}
+
+	if (unique.mode === "keepLast") {
+		return { id: unique.key, ttl: unique.ttlMs, extend: true, replace: true }
+	}
+
+	if (unique.ttlMs === undefined) {
+		return { id: unique.key }
+	}
+
+	return { id: unique.key, ttl: unique.ttlMs }
+}
+
+export function toJobsOptions(delivery: Delivery): JobsOptions {
+	const base: JobsOptions = {
 		attempts: delivery.attempts,
 		backoff: { type: delivery.backoff.type, delay: delivery.backoff.delayMs },
 		priority: delivery.priority,
 		removeOnComplete: { age: Math.round(delivery.keepCompletedForMs / 1_000) },
 		removeOnFail: { count: delivery.keepFailedCount },
 	}
+
+	const options = delivery.unique
+		? { ...base, deduplication: toDeduplication(delivery.unique) }
+		: base
 
 	if (delivery.delayMs === undefined) {
 		return options

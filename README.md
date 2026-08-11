@@ -125,7 +125,7 @@ The memory driver does not simulate the clock, delays, backoff, retries, priorit
 
 It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and `keepFailedCount`, but only `attempts` reaches your handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored. Per-queue `concurrency` is accepted and ignored too — jobs run inline, one at a time.
 
-Everything else throws, and that is the point. `delayMs` and a queue `limiter` are time-dependent, so the memory driver refuses them instead of pretending. The error names the option and sends you to `redisDriver`, so a behaviour this driver never learns to simulate fails loudly instead of passing a test it would fail in production.
+Everything else throws, and that is the point. `delayMs`, `unique` and a queue `limiter` are time-dependent, so the memory driver refuses them instead of pretending. The error names the option and sends you to `redisDriver`, so a behaviour this driver never learns to simulate fails loudly instead of passing a test it would fail in production.
 
 ## Payload validation on both sides
 
@@ -169,6 +169,7 @@ Tuning aimed at a queue this process does not start is the fourth: a typo in `st
 | `keepCompletedForMs` | `3600000` | How long a completed job stays in Redis |
 | `keepFailedCount` | `200` | How many failed jobs stay in Redis |
 | `delayMs` | none | Wait this long before the job becomes available |
+| `unique` | none | Which job survives when several share a key — see below |
 
 You override only what you name. Anything you leave out keeps its default.
 
@@ -196,6 +197,59 @@ export const sendReport = defineJob({
 ```
 
 `delayMs` is the one option the memory driver refuses, because a fake clock that resolves instantly would turn a delay into a green test and a production surprise. Test a delay against `redisDriver`.
+
+## Uniqueness
+
+`unique` decides which of several jobs sharing a key survives. `key` reads the **validated** payload and returns that key, so one definition can be unique per user, per entity or per account. Redis decides it atomically at the moment of the enqueue, so two processes racing on the same key still leave one winner.
+
+| Mode | Which job wins |
+| --- | --- |
+| `keepFirst` | the first enqueued; every later one is dropped |
+| `keepLast` | the last enqueued inside the window; it replaces the one waiting |
+| `noOverlap` | the running one, and the latest of those enqueued while it runs |
+
+Use `keepFirst` for work that must happen once. A welcome email per user: the signup flow fires twice, the second enqueue is dropped, and the user is welcomed once.
+
+```ts
+export const sendWelcomeEmail = defineJob({
+	name: "email.welcome",
+	queue: "mail",
+	payload: type({ userId: "string" }),
+	delivery: {
+		unique: { key: (data) => data.userId, mode: "keepFirst", ttlMs: 24 * 60 * 60 * 1_000 },
+	},
+})
+```
+
+`ttlMs` is how long the key stays taken, counted from the enqueue and outliving the job itself. Leave it out and the key is released the moment the job finishes, so the next enqueue after that is a new job.
+
+Use `keepLast` for work that should collapse into its latest version. Rebuilding a search index for an entity: ten edits in five seconds enqueue ten jobs, and the index is rebuilt once, from the tenth payload.
+
+```ts
+export const rebuildIndex = defineJob({
+	name: "search.rebuild",
+	queue: "search",
+	payload: type({ entityId: "string" }),
+	delivery: { unique: { key: (data) => data.entityId, mode: "keepLast", ttlMs: 5_000 } },
+})
+```
+
+`keepLast` needs `ttlMs` and refuses the enqueue without it, because a window of zero has nothing to collapse. The window also **delays** the job: it waits `ttlMs` before becoming available, and that wait is exactly what gives a later enqueue the room to replace it. When the definition also names `delayMs`, the larger of the two wins — so a 5 second window and a 30 second delay run 30 seconds later, still collapsed.
+
+Use `noOverlap` for work that must not run twice at once. One sync per account: while a sync runs, further enqueues start no second one; the latest of them is kept and runs when the first finishes.
+
+```ts
+export const syncAccount = defineJob({
+	name: "account.sync",
+	queue: "sync",
+	payload: type({ accountId: "string" }),
+	delivery: { unique: { key: (data) => data.accountId, mode: "noOverlap" } },
+})
+```
+
+`noOverlap` ignores `ttlMs`, so juibs drops it: the key lives exactly as long as the job it guards. At most two jobs per key exist at any moment — one running, one waiting.
+
+The memory driver throws on `unique`. Uniqueness is decided inside Redis, atomically and on a clock; an inline imitation would agree with your test and disagree with production. Test it against `redisDriver`.
 
 ## Hooks
 
