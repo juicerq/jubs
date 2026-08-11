@@ -1,17 +1,19 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { type DeadJob, deadJobId, readDeadJobId } from "@/Dead"
 import type { JobDefinition, JobHandler } from "@/Definition"
-import { resolveDelivery, resolveReplayDelivery } from "@/Delivery"
+import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type { EnqueuedJob, JobDriver } from "@/Driver"
 import { PAYLOAD_VERSION } from "@/Envelope"
 import type { JobHooks } from "@/Hooks"
 import { validatePayload } from "@/Payload"
 import { type JobsRuntime, type StartOptions, startRuntime } from "@/Runtime"
+import { assertTimezone } from "@/Schedule"
 
 export interface JobsConfig {
 	readonly driver: JobDriver
 	readonly definitions?: readonly JobDefinition[]
 	readonly deadQueues?: readonly string[]
+	readonly timezone?: string
 	readonly hooks?: JobHooks
 }
 
@@ -50,6 +52,10 @@ function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
 export function createJobs(config: JobsConfig): JobsClient {
 	assertEveryDeadQueueIsUsed(config)
 
+	if (config.timezone) {
+		assertTimezone(config.timezone)
+	}
+
 	return {
 		dead: {
 			async list(queue) {
@@ -83,7 +89,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 				const enqueued = await config.driver.enqueue({
 					queue: definition.queue,
 					envelope: entry.envelope,
-					delivery: resolveReplayDelivery(definition, validated),
+					delivery: resolveDeliveryWithoutUniqueness(definition, validated),
 				})
 
 				await config.driver.dead.remove(queue, storedId)

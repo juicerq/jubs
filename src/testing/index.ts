@@ -60,6 +60,11 @@ export interface MemoryDriver extends JobDriver {
  *
  * Per-queue `concurrency` is accepted and ignored — jobs run inline, one at a
  * time. A `limiter` throws, for the same reason a delay does.
+ *
+ * Starting a queue whose definitions declare a schedule throws, because a
+ * recurrence is nothing but a clock: an inline imitation would fire when your
+ * test asked it to and never again in production. A started queue that declares
+ * no schedule reconciles to nothing and passes.
  */
 export function memoryDriver(): MemoryDriver {
 	const recorded: MemoryJob[] = []
@@ -139,6 +144,14 @@ export function memoryDriver(): MemoryDriver {
 					consumers.delete(request.queue)
 				},
 			}
+		},
+
+		async reconcileSchedules(request) {
+			if (request.declared.length === 0) {
+				return
+			}
+
+			throw unsupported("schedule")
 		},
 
 		dead: {

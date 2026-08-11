@@ -1,6 +1,7 @@
 import type { DeadEntry } from "@/Dead"
 import type { Delivery } from "@/Delivery"
 import type { Envelope } from "@/Envelope"
+import type { Recurrence } from "@/Schedule"
 
 export interface EnqueueRequest {
 	readonly queue: string
@@ -42,8 +43,21 @@ export interface DeadStore {
 	remove(queue: string, id: string): Promise<boolean>
 }
 
+export interface ScheduleUpsert {
+	readonly recurrence: Recurrence
+	readonly timezone?: string
+	readonly envelope: Envelope
+	readonly delivery: Delivery
+}
+
+export interface ReconcileRequest {
+	readonly queue: string
+	readonly declared: readonly ScheduleUpsert[]
+}
+
 export interface JobDriver {
 	enqueue(request: EnqueueRequest): Promise<EnqueuedJob>
 	consume(request: ConsumeRequest): Promise<Consumer>
+	reconcileSchedules(request: ReconcileRequest): Promise<void>
 	readonly dead: DeadStore
 }

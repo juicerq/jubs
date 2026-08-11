@@ -1,14 +1,22 @@
 import {
 	type ConnectionOptions,
 	type DeduplicationOptions,
+	type JobSchedulerTemplateOptions,
 	type JobsOptions,
 	Queue,
+	type RepeatOptions,
 	Worker,
 	type WorkerOptions,
 } from "bullmq"
 import { type DeadEntry, deadQueueName } from "@/Dead"
 import type { Delivery, ResolvedUnique } from "@/Delivery"
-import type { ConsumeRequest, JobDriver } from "@/Driver"
+import type { ConsumeRequest, JobDriver, ScheduleUpsert } from "@/Driver"
+
+const SCHEDULER_PREFIX = "juibs."
+
+function schedulerId(jobName: string): string {
+	return `${SCHEDULER_PREFIX}${jobName}`
+}
 
 const BLOCKING_CONNECTION_FIX =
 	"juibs: the Redis connection passed to redisDriver must be created with `maxRetriesPerRequest: null`, because a BullMQ worker opens a blocking connection — new Redis(url, { maxRetriesPerRequest: null })"
@@ -55,14 +63,47 @@ function toDeduplication(unique: ResolvedUnique): DeduplicationOptions {
 	return { id: unique.key, ttl: unique.ttlMs }
 }
 
-export function toJobsOptions(delivery: Delivery): JobsOptions {
-	const base: JobsOptions = {
+function toTemplateOptions(delivery: Delivery): JobSchedulerTemplateOptions {
+	return {
 		attempts: delivery.attempts,
 		backoff: { type: delivery.backoff.type, delay: delivery.backoff.delayMs },
 		priority: delivery.priority,
 		removeOnComplete: { age: Math.round(delivery.keepCompletedForMs / 1_000) },
 		removeOnFail: { count: delivery.keepFailedCount },
 	}
+}
+
+function toRepeatOptions(schedule: ScheduleUpsert): RepeatOptions {
+	if ("everyMs" in schedule.recurrence) {
+		return { every: schedule.recurrence.everyMs }
+	}
+
+	if (!schedule.timezone) {
+		return { pattern: schedule.recurrence.pattern }
+	}
+
+	return { pattern: schedule.recurrence.pattern, tz: schedule.timezone }
+}
+
+function refusedRecurrence(schedule: ScheduleUpsert): string {
+	if ("everyMs" in schedule.recurrence) {
+		return `the interval of ${schedule.recurrence.everyMs}ms`
+	}
+
+	return `the pattern "${schedule.recurrence.pattern}"`
+}
+
+function refusedSchedule(schedule: ScheduleUpsert, error: unknown): Error {
+	const reason = error instanceof Error ? error.message : String(error)
+
+	return new Error(
+		`juibs: redis refused the schedule of the job "${schedule.envelope.name}" — correct ${refusedRecurrence(schedule)} its definition declares, or the time zone it runs in — ${reason}`,
+		{ cause: error },
+	)
+}
+
+export function toJobsOptions(delivery: Delivery): JobsOptions {
+	const base: JobsOptions = toTemplateOptions(delivery)
 
 	const options = delivery.unique
 		? { ...base, deduplication: toDeduplication(delivery.unique) }
@@ -118,6 +159,32 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			}
 
 			return { id: job.id }
+		},
+
+		async reconcileSchedules({ queue, declared }) {
+			assertBlockingConnection(connection)
+
+			const handle = queueFor(queue)
+			const existing = await handle.getJobSchedulers()
+			const kept = new Set(declared.map((schedule) => schedulerId(schedule.envelope.name)))
+
+			const stale = existing
+				.map((scheduler) => scheduler.key)
+				.filter((key) => key.startsWith(SCHEDULER_PREFIX) && !kept.has(key))
+
+			await Promise.all(stale.map((key) => handle.removeJobScheduler(key)))
+
+			for (const schedule of declared) {
+				await handle
+					.upsertJobScheduler(schedulerId(schedule.envelope.name), toRepeatOptions(schedule), {
+						name: schedule.envelope.name,
+						data: schedule.envelope,
+						opts: toTemplateOptions(schedule.delivery),
+					})
+					.catch((error: unknown) => {
+						throw refusedSchedule(schedule, error)
+					})
+			}
 		},
 
 		dead: {

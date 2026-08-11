@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
-import { createJobs, DELIVERY_DEFAULTS, type Delivery, defineJob } from "@/index"
+import { createJobs, DELIVERY_DEFAULTS, type Delivery, defineJob, every } from "@/index"
 import { memoryDriver } from "@/testing/index"
 import { recordingDriver } from "./support/RecordingDriver"
 
@@ -176,5 +176,52 @@ describe("delivery", () => {
 		await createJobs({ driver }).enqueue(charge, { cents: "500" })
 
 		expect(driver.enqueued[0]?.delivery).toEqual(DELIVERY_DEFAULTS)
+	})
+
+	test("a scheduled definition attempts once, so two occurrences never overlap", async () => {
+		const driver = recordingDriver()
+
+		const sweep = defineJob({
+			name: "billing.sweep",
+			queue: "billing",
+			payload: type({ cents: "string.numeric.parse" }),
+			schedule: every("5 minutes"),
+		})
+
+		await createJobs({ driver }).enqueue(sweep, { cents: "500" })
+
+		expect(driver.enqueued[0]?.delivery).toEqual({ ...DELIVERY_DEFAULTS, attempts: 1 })
+	})
+
+	test("keeps the attempts a scheduled definition names for itself", async () => {
+		const driver = recordingDriver()
+
+		const sweep = defineJob({
+			name: "billing.sweep",
+			queue: "billing",
+			payload: type({ cents: "string.numeric.parse" }),
+			schedule: every("5 minutes"),
+			delivery: { attempts: 3 },
+		})
+
+		await createJobs({ driver }).enqueue(sweep, { cents: "500" })
+
+		expect(driver.enqueued[0]?.delivery.attempts).toBe(3)
+	})
+
+	test("hands a scheduled definition the single attempt as the policy's own default", async () => {
+		const driver = recordingDriver()
+
+		const sweep = defineJob({
+			name: "billing.sweep",
+			queue: "billing",
+			payload: type({ cents: "string.numeric.parse" }),
+			schedule: every("5 minutes"),
+			delivery: ({ options }) => ({ attempts: options.attempts * 2 }),
+		})
+
+		await createJobs({ driver }).enqueue(sweep, { cents: "500" })
+
+		expect(driver.enqueued[0]?.delivery.attempts).toBe(2)
 	})
 })

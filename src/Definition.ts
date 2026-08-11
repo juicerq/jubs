@@ -1,5 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import type { DeliveryPolicy } from "@/Delivery"
+import type { Schedule } from "@/Schedule"
 
 export type Origin = "direct" | "schedule" | "flow" | "relay"
 
@@ -15,11 +16,13 @@ export interface JobDefinition<Payload extends StandardSchemaV1 = StandardSchema
 	readonly queue: string
 	readonly payload: Payload
 	readonly delivery?: DeliveryPolicy
+	readonly schedule?: Schedule
 }
 
 export interface JobDefinitionInput<Payload extends StandardSchemaV1>
-	extends Omit<JobDefinition<Payload>, "delivery"> {
+	extends Omit<JobDefinition<Payload>, "delivery" | "schedule"> {
 	readonly delivery?: DeliveryPolicy<StandardSchemaV1.InferOutput<Payload>>
+	readonly schedule?: Schedule<StandardSchemaV1.InferInput<Payload>>
 }
 
 export interface JobHandler {
@@ -35,7 +38,8 @@ export type HandlerRun<Payload extends StandardSchemaV1> = (
 export function defineJob<Payload extends StandardSchemaV1>(
 	input: JobDefinitionInput<Payload>,
 ): JobDefinition<Payload> {
-	const definition = { name: input.name, queue: input.queue, payload: input.payload }
+	const named = { name: input.name, queue: input.queue, payload: input.payload }
+	const definition = input.schedule ? { ...named, schedule: input.schedule } : named
 
 	if (!input.delivery) {
 		return definition

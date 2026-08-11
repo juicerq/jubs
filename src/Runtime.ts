@@ -2,13 +2,24 @@ import { UnrecoverableError } from "bullmq"
 import type { JobsConfig } from "@/Client"
 import { type DeadReason, deadQueueName } from "@/Dead"
 import type { JobDefinition, JobHandler } from "@/Definition"
-import type { ConsumeRequest, Consumer, JobDelivery, JobDriver, QueueLimiter } from "@/Driver"
-import { type Envelope, readEnvelope } from "@/Envelope"
+import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
+import type {
+	ConsumeRequest,
+	Consumer,
+	JobDelivery,
+	JobDriver,
+	QueueLimiter,
+	ScheduleUpsert,
+} from "@/Driver"
+import { type Envelope, PAYLOAD_VERSION, readEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
 import { validatePayload } from "@/Payload"
+import type { Schedule } from "@/Schedule"
 
 export const DEFAULT_CONCURRENCY = 10
+
+const DEFAULT_TIMEZONE = "UTC"
 
 export interface QueueTuning {
 	readonly concurrency?: number
@@ -117,6 +128,77 @@ function assertNoQueueConsumesADeadQueue(deadQueues: Set<string>, queues: string
 	)
 }
 
+async function scheduleUpsert(
+	config: JobsConfig,
+	definition: JobDefinition,
+	schedule: Schedule,
+): Promise<ScheduleUpsert> {
+	const data = await validatePayload(definition, schedule.data).catch((error: unknown) => {
+		const reason = error instanceof Error ? error.message : String(error)
+
+		throw new Error(
+			`juibs: the schedule of the job "${definition.name}" carries no payload its schema accepts — a scheduled job has no producer to pass one, so give the schedule its own \`data\`, as in every("5 minutes", { data: { ... } }) — ${reason}`,
+			{ cause: error },
+		)
+	})
+
+	const delivery = resolveDeliveryWithoutUniqueness(definition, data)
+
+	if (delivery.delayMs !== undefined) {
+		throw new Error(
+			`juibs: the job "${definition.name}" has a schedule and a delivery \`delayMs\` — a delay postpones one enqueue, which a recurrence has no place for, so drop \`delayMs\` from its delivery`,
+		)
+	}
+
+	const upsert: ScheduleUpsert = {
+		recurrence: schedule.recurrence,
+		envelope: {
+			v: PAYLOAD_VERSION,
+			name: definition.name,
+			data: schedule.data,
+			origin: "schedule",
+		},
+		delivery,
+	}
+
+	if ("everyMs" in schedule.recurrence) {
+		return upsert
+	}
+
+	return { ...upsert, timezone: schedule.timezone ?? config.timezone ?? DEFAULT_TIMEZONE }
+}
+
+function declaredSchedules(
+	config: JobsConfig,
+	handlers: JobHandler[],
+	queue: string,
+): Promise<ScheduleUpsert[]> {
+	return Promise.all(
+		handlers.flatMap(({ definition }) =>
+			definition.queue === queue && definition.schedule
+				? [scheduleUpsert(config, definition, definition.schedule)]
+				: [],
+		),
+	)
+}
+
+async function reconcileEveryQueue(
+	config: JobsConfig,
+	handlers: JobHandler[],
+	queues: string[],
+): Promise<void> {
+	const requests = await Promise.all(
+		queues.map(async (queue) => ({
+			queue,
+			declared: await declaredSchedules(config, handlers, queue),
+		})),
+	)
+
+	for (const request of requests) {
+		await config.driver.reconcileSchedules(request)
+	}
+}
+
 async function openConsumers(driver: JobDriver, requests: ConsumeRequest[]): Promise<Consumer[]> {
 	const settled = await Promise.allSettled(requests.map((request) => driver.consume(request)))
 
@@ -164,6 +246,8 @@ export async function startRuntime(
 	assertEveryDefinitionRuns(config.definitions ?? [], byName, queues)
 	assertEveryTunedQueueStarted(Object.keys(options?.queues ?? {}), queues)
 	assertNoQueueConsumesADeadQueue(deadQueues, queues)
+
+	await reconcileEveryQueue(config, handlers, queues)
 
 	async function dispatch(
 		envelope: Envelope,

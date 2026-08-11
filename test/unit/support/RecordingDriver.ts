@@ -1,4 +1,11 @@
-import type { ConsumeRequest, Delivery, Envelope, JobDelivery, JobDriver } from "@/index"
+import type {
+	ConsumeRequest,
+	Delivery,
+	Envelope,
+	JobDelivery,
+	JobDriver,
+	ReconcileRequest,
+} from "@/index"
 
 export interface RecordedEnqueue {
 	readonly queue: string
@@ -9,13 +16,19 @@ export interface RecordedEnqueue {
 export interface RecordingDriver extends JobDriver {
 	readonly enqueued: RecordedEnqueue[]
 	readonly consumed: ConsumeRequest[]
+	readonly reconciled: ReconcileRequest[]
 	readonly consuming: string[]
 	deliver(queue: string, delivery: JobDelivery): Promise<unknown>
+	refuseSchedules(): void
 }
+
+const REFUSED_RECONCILE = "recordingDriver was told to refuse the schedules of this start"
 
 export function recordingDriver(): RecordingDriver {
 	const enqueued: RecordedEnqueue[] = []
 	const consumed: ConsumeRequest[] = []
+	const reconciled: ReconcileRequest[] = []
+	let refusing = false
 	const consumers = new Map<string, ConsumeRequest["run"]>()
 	let delivered = 0
 
@@ -28,6 +41,19 @@ export function recordingDriver(): RecordingDriver {
 	return {
 		enqueued,
 		consumed,
+		reconciled,
+
+		refuseSchedules() {
+			refusing = true
+		},
+
+		async reconcileSchedules(request) {
+			if (refusing) {
+				throw new Error(REFUSED_RECONCILE)
+			}
+
+			reconciled.push(request)
+		},
 
 		dead: {
 			bury: unsupported,

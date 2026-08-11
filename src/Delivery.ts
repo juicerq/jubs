@@ -42,6 +42,8 @@ export const DELIVERY_DEFAULTS: Delivery = {
 	keepFailedCount: 200,
 }
 
+const SCHEDULED_DEFAULTS: Delivery = { ...DELIVERY_DEFAULTS, attempts: 1 }
+
 function resolveUnique(unique: Unique, data: unknown): ResolvedUnique {
 	const key = unique.key(data)
 
@@ -74,20 +76,20 @@ function resolveDelayMs(delayMs: number | undefined, unique?: ResolvedUnique): n
 
 function resolve(definition: JobDefinition, data: unknown, keepUnique: boolean): Delivery {
 	const policy = definition.delivery
+	const defaults = definition.schedule ? SCHEDULED_DEFAULTS : DELIVERY_DEFAULTS
 
 	if (!policy) {
-		return DELIVERY_DEFAULTS
+		return defaults
 	}
 
-	const overrides =
-		typeof policy === "function" ? policy({ data, options: DELIVERY_DEFAULTS }) : policy
+	const overrides = typeof policy === "function" ? policy({ data, options: defaults }) : policy
 
 	const resolved: Delivery = {
-		attempts: overrides.attempts ?? DELIVERY_DEFAULTS.attempts,
-		backoff: overrides.backoff ?? DELIVERY_DEFAULTS.backoff,
-		priority: overrides.priority ?? DELIVERY_DEFAULTS.priority,
-		keepCompletedForMs: overrides.keepCompletedForMs ?? DELIVERY_DEFAULTS.keepCompletedForMs,
-		keepFailedCount: overrides.keepFailedCount ?? DELIVERY_DEFAULTS.keepFailedCount,
+		attempts: overrides.attempts ?? defaults.attempts,
+		backoff: overrides.backoff ?? defaults.backoff,
+		priority: overrides.priority ?? defaults.priority,
+		keepCompletedForMs: overrides.keepCompletedForMs ?? defaults.keepCompletedForMs,
+		keepFailedCount: overrides.keepFailedCount ?? defaults.keepFailedCount,
 	}
 
 	const unique = keepUnique && overrides.unique ? resolveUnique(overrides.unique, data) : undefined
@@ -105,6 +107,9 @@ export function resolveDelivery(definition: JobDefinition, data: unknown): Deliv
 	return resolve(definition, data, true)
 }
 
-export function resolveReplayDelivery(definition: JobDefinition, data: unknown): Delivery {
+export function resolveDeliveryWithoutUniqueness(
+	definition: JobDefinition,
+	data: unknown,
+): Delivery {
 	return resolve(definition, data, false)
 }

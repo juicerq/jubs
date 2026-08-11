@@ -19,6 +19,8 @@ export type {
 	JobDelivery,
 	JobDriver,
 	QueueLimiter,
+	ReconcileRequest,
+	ScheduleUpsert,
 } from "@/Driver"
 export { type Envelope, PAYLOAD_VERSION, type TraceContext } from "@/Envelope"
 export type { SerializedError } from "@/Failure"
@@ -26,3 +28,16 @@ export type { JobEvent, JobFailureEvent, JobHooks } from "@/Hooks"
 export { PayloadError } from "@/Payload"
 export { redisDriver } from "@/RedisDriver"
 export type { JobsRuntime, StartOptions } from "@/Runtime"
+export {
+	assertTimezone,
+	cron,
+	dailyAt,
+	every,
+	type IntervalOptions,
+	monthlyOn,
+	type Recurrence,
+	type Schedule,
+	type ScheduleOptions,
+	type Weekday,
+	weeklyOn,
+} from "@/Schedule"

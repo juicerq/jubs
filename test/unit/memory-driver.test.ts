@@ -1,6 +1,13 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
-import { createJobs, DELIVERY_DEFAULTS, type Delivery, defineHandler, defineJob } from "@/index"
+import {
+	createJobs,
+	DELIVERY_DEFAULTS,
+	type Delivery,
+	defineHandler,
+	defineJob,
+	every,
+} from "@/index"
 import { memoryDriver } from "@/testing/index"
 
 const chargeCard = defineJob({
@@ -200,5 +207,44 @@ describe("memoryDriver", () => {
 
 	test("drain returns 0 when nothing is pending", async () => {
 		expect(await memoryDriver().drain()).toBe(0)
+	})
+
+	test("start fails on a declared schedule, before any consumer opens", async () => {
+		const driver = memoryDriver()
+
+		const sweepSessions = defineJob({
+			name: "session.sweep",
+			queue: "maintenance",
+			payload: type({ olderThanDays: "number" }),
+			schedule: every("5 minutes", { data: { olderThanDays: 30 } }),
+		})
+
+		const jobs = createJobs({ driver, definitions: [sweepSessions] })
+
+		await jobs.enqueue(sweepSessions, { olderThanDays: 30 })
+
+		const failure = await jobs
+			.start([defineHandler(sweepSessions, async () => {})])
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toBe(
+			'juibs: memoryDriver does not simulate "schedule"; test that behaviour against redisDriver',
+		)
+
+		const orphan = await driver.runNext().catch((error: unknown) => error)
+
+		expect((orphan as Error).message).toContain('no consumer on queue "maintenance"')
+	})
+
+	test("start accepts a queue that declares no schedule", async () => {
+		const driver = memoryDriver()
+
+		await createJobs({ driver, definitions: [chargeCard] }).start([
+			defineHandler(chargeCard, async () => {}),
+		])
+
+		await createJobs({ driver }).enqueue(chargeCard, { cents: "500" })
+
+		expect(await driver.drain()).toBe(1)
 	})
 })
