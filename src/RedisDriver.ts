@@ -1,6 +1,6 @@
-import { type ConnectionOptions, type JobsOptions, Queue, Worker } from "bullmq"
+import { type ConnectionOptions, type JobsOptions, Queue, Worker, type WorkerOptions } from "bullmq"
 import type { Delivery } from "@/Delivery"
-import type { JobDriver } from "@/Driver"
+import type { ConsumeRequest, JobDriver } from "@/Driver"
 
 const BLOCKING_CONNECTION_FIX =
 	"juibs: the Redis connection passed to redisDriver must be created with `maxRetriesPerRequest: null`, because a BullMQ worker opens a blocking connection — new Redis(url, { maxRetriesPerRequest: null })"
@@ -23,7 +23,7 @@ function blockingOptions(connection: ConnectionOptions) {
 	return client.options
 }
 
-function assertBlockingConnection(connection: ConnectionOptions): void {
+export function assertBlockingConnection(connection: ConnectionOptions): void {
 	if (!blockingOptions(connection)?.maxRetriesPerRequest) {
 		return
 	}
@@ -32,12 +32,31 @@ function assertBlockingConnection(connection: ConnectionOptions): void {
 }
 
 function toJobsOptions(delivery: Delivery): JobsOptions {
-	return {
+	const options: JobsOptions = {
 		attempts: delivery.attempts,
 		backoff: { type: delivery.backoff.type, delay: delivery.backoff.delayMs },
 		priority: delivery.priority,
 		removeOnComplete: { age: Math.round(delivery.keepCompletedForMs / 1_000) },
 		removeOnFail: { count: delivery.keepFailedCount },
+	}
+
+	if (delivery.delayMs === undefined) {
+		return options
+	}
+
+	return { ...options, delay: delivery.delayMs }
+}
+
+function toWorkerOptions(request: ConsumeRequest, connection: ConnectionOptions): WorkerOptions {
+	const options: WorkerOptions = { connection, concurrency: request.concurrency }
+
+	if (!request.limiter) {
+		return options
+	}
+
+	return {
+		...options,
+		limiter: { max: request.limiter.max, duration: request.limiter.durationMs },
 	}
 }
 
@@ -90,7 +109,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 						envelope: job.data,
 					})
 				},
-				{ connection },
+				toWorkerOptions(request, connection),
 			)
 
 			await worker.waitUntilReady()

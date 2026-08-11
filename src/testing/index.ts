@@ -11,6 +11,12 @@ const ACCEPTED_DELIVERY = [
 	"keepFailedCount",
 ]
 
+function unsupported(behaviour: string): Error {
+	return new Error(
+		`juibs: memoryDriver does not simulate "${behaviour}"; test that behaviour against redisDriver`,
+	)
+}
+
 interface MemoryJob {
 	readonly id: string
 	readonly queue: string
@@ -35,11 +41,15 @@ export interface MemoryDriver extends JobDriver {
  * instead of being retried. Anything time-dependent is only testable against
  * `redisDriver`.
  *
- * It accepts every option of the base `Delivery`, but only `attempts` reaches the
- * handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored.
- * Any option outside that set throws on enqueue and names itself, so a delivery
- * behaviour this driver never learns to simulate fails loudly instead of passing
- * a test it would fail in production.
+ * It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and
+ * `keepFailedCount`, but only `attempts` reaches the handler, as `maxAttempts`.
+ * `delayMs` is time-dependent, so it throws instead: test a delay against
+ * `redisDriver`. Any delivery option outside the accepted set throws on enqueue
+ * and names itself, so a behaviour this driver never learns to simulate fails
+ * loudly instead of passing a test it would fail in production.
+ *
+ * Per-queue `concurrency` is accepted and ignored — jobs run inline, one at a
+ * time. A `limiter` throws, for the same reason a delay does.
  */
 export function memoryDriver(): MemoryDriver {
 	const recorded: MemoryJob[] = []
@@ -73,14 +83,10 @@ export function memoryDriver(): MemoryDriver {
 
 	return {
 		async enqueue(request) {
-			const unsupported = Object.keys(request.delivery).find(
-				(key) => !ACCEPTED_DELIVERY.includes(key),
-			)
+			const rejected = Object.keys(request.delivery).find((key) => !ACCEPTED_DELIVERY.includes(key))
 
-			if (unsupported) {
-				throw new Error(
-					`juibs: memoryDriver does not simulate "${unsupported}"; test that behaviour against redisDriver`,
-				)
+			if (rejected) {
+				throw unsupported(rejected)
 			}
 
 			const job: MemoryJob = {
@@ -97,6 +103,10 @@ export function memoryDriver(): MemoryDriver {
 		},
 
 		async consume(request) {
+			if (request.limiter) {
+				throw unsupported("limiter")
+			}
+
 			consumers.set(request.queue, request.run)
 
 			return {

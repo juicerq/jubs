@@ -8,17 +8,20 @@ export interface RecordedEnqueue {
 
 export interface RecordingDriver extends JobDriver {
 	readonly enqueued: RecordedEnqueue[]
+	readonly consumed: ConsumeRequest[]
 	readonly consuming: string[]
 	deliver(queue: string, delivery: JobDelivery): Promise<unknown>
 }
 
 export function recordingDriver(): RecordingDriver {
 	const enqueued: RecordedEnqueue[] = []
+	const consumed: ConsumeRequest[] = []
 	const consumers = new Map<string, ConsumeRequest["run"]>()
 	let delivered = 0
 
 	return {
 		enqueued,
+		consumed,
 
 		get consuming() {
 			return [...consumers.keys()]
@@ -36,6 +39,7 @@ export function recordingDriver(): RecordingDriver {
 		},
 
 		async consume(request) {
+			consumed.push(request)
 			consumers.set(request.queue, request.run)
 
 			return {

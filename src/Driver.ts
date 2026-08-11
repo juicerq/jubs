@@ -18,8 +18,15 @@ export interface JobDelivery {
 	readonly envelope: unknown
 }
 
+export interface QueueLimiter {
+	readonly max: number
+	readonly durationMs: number
+}
+
 export interface ConsumeRequest {
 	readonly queue: string
+	readonly concurrency: number
+	readonly limiter?: QueueLimiter
 	readonly run: (delivery: JobDelivery) => Promise<unknown>
 }
 

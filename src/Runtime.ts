@@ -1,8 +1,22 @@
 import { UnrecoverableError } from "bullmq"
-import type { JobHandler } from "@/Definition"
-import type { JobDelivery, JobDriver } from "@/Driver"
-import { readEnvelope } from "@/Envelope"
+import type { JobsConfig } from "@/Client"
+import type { JobDefinition, JobHandler } from "@/Definition"
+import type { ConsumeRequest, Consumer, JobDelivery, JobDriver, QueueLimiter } from "@/Driver"
+import { type Envelope, readEnvelope } from "@/Envelope"
+import { serializeError } from "@/Failure"
+import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
 import { validatePayload } from "@/Payload"
+
+export const DEFAULT_CONCURRENCY = 10
+
+export interface QueueTuning {
+	readonly concurrency?: number
+	readonly limiter?: QueueLimiter
+}
+
+export interface StartOptions {
+	readonly queues?: Record<string, QueueTuning>
+}
 
 export interface JobsRuntime {
 	close(): Promise<void>
@@ -16,42 +30,184 @@ function unrecoverable(error: unknown): UnrecoverableError {
 	return failure
 }
 
-export async function startRuntime(
-	driver: JobDriver,
-	handlers: JobHandler[],
-): Promise<JobsRuntime> {
-	const byName = new Map(handlers.map((handler) => [handler.definition.name, handler]))
+function envelopeOf(delivery: JobDelivery): Envelope {
+	try {
+		return readEnvelope(delivery.envelope)
+	} catch (error) {
+		throw unrecoverable(error)
+	}
+}
 
-	async function resolve(delivery: JobDelivery) {
-		const envelope = readEnvelope(delivery.envelope)
+function isFinal(delivery: JobDelivery, error: unknown): boolean {
+	return error instanceof UnrecoverableError || delivery.attempt >= delivery.maxAttempts
+}
+
+function handlersByName(handlers: JobHandler[]): Map<string, JobHandler> {
+	const byName = new Map<string, JobHandler>()
+
+	for (const handler of handlers) {
+		const { name } = handler.definition
+
+		if (byName.has(name)) {
+			throw new Error(
+				`juibs: two handlers are registered for the job "${name}" — a job name takes exactly one handler`,
+			)
+		}
+
+		byName.set(name, handler)
+	}
+
+	return byName
+}
+
+function assertEveryDefinitionRuns(
+	definitions: readonly JobDefinition[],
+	byName: Map<string, JobHandler>,
+	queues: string[],
+): void {
+	const started = new Set(queues)
+
+	const orphan = definitions.find(
+		(definition) => started.has(definition.queue) && !byName.has(definition.name),
+	)
+
+	if (!orphan) {
+		return
+	}
+
+	throw new Error(
+		`juibs: the job "${orphan.name}" is registered on the started queue "${orphan.queue}" but no handler runs it — pass its handler to start(), or drop it from createJobs({ definitions })`,
+	)
+}
+
+function assertEveryTunedQueueStarted(tuned: string[], queues: string[]): void {
+	const started = new Set(queues)
+	const stray = tuned.find((queue) => !started.has(queue))
+
+	if (!stray) {
+		return
+	}
+
+	const names = queues.map((queue) => `"${queue}"`).join(", ")
+
+	throw new Error(
+		`juibs: start() was given tuning for the queue "${stray}", which no handler starts — the started queues are ${names}`,
+	)
+}
+
+async function openConsumers(driver: JobDriver, requests: ConsumeRequest[]): Promise<Consumer[]> {
+	const settled = await Promise.allSettled(requests.map((request) => driver.consume(request)))
+
+	const opened = settled.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []))
+	const refused = settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : []))
+
+	if (refused.length === 0) {
+		return opened
+	}
+
+	await Promise.all(
+		opened.map((consumer) =>
+			consumer.close().catch((error: unknown) => {
+				console.error("juibs: a consumer opened before start failed could not be closed", error)
+			}),
+		),
+	)
+
+	throw refused[0]
+}
+
+function consumeRequest(
+	queue: string,
+	tuning: QueueTuning | undefined,
+	run: ConsumeRequest["run"],
+): ConsumeRequest {
+	const request = { queue, concurrency: tuning?.concurrency ?? DEFAULT_CONCURRENCY, run }
+
+	if (!tuning?.limiter) {
+		return request
+	}
+
+	return { ...request, limiter: tuning.limiter }
+}
+
+export async function startRuntime(
+	config: JobsConfig,
+	handlers: JobHandler[],
+	options?: StartOptions,
+): Promise<JobsRuntime> {
+	const byName = handlersByName(handlers)
+	const queues = [...new Set(handlers.map((handler) => handler.definition.queue))]
+
+	assertEveryDefinitionRuns(config.definitions ?? [], byName, queues)
+	assertEveryTunedQueueStarted(Object.keys(options?.queues ?? {}), queues)
+
+	async function dispatch(
+		envelope: Envelope,
+		event: JobEvent,
+		delivery: JobDelivery,
+	): Promise<unknown> {
 		const handler = byName.get(envelope.name)
 
 		if (!handler) {
-			throw new Error(`juibs: no handler is registered for job "${envelope.name}"`)
+			throw unrecoverable(new Error(`juibs: no handler is registered for job "${envelope.name}"`))
 		}
 
-		return {
-			handler,
-			data: await validatePayload(handler.definition, envelope.data),
-			context: {
-				id: delivery.id,
-				attempt: delivery.attempt,
-				maxAttempts: delivery.maxAttempts,
-				origin: envelope.origin,
+		await notify(config.hooks?.onStart, "onStart", event)
+
+		const data = await validatePayload(handler.definition, envelope.data).catch(
+			(error: unknown) => {
+				throw unrecoverable(error)
 			},
-		}
-	}
+		)
 
-	async function run(delivery: JobDelivery): Promise<unknown> {
-		const dispatch = await resolve(delivery).catch((error: unknown) => {
-			throw unrecoverable(error)
+		const result = await handler.run(data, {
+			id: delivery.id,
+			attempt: delivery.attempt,
+			maxAttempts: delivery.maxAttempts,
+			origin: envelope.origin,
 		})
 
-		return dispatch.handler.run(dispatch.data, dispatch.context)
+		await notify(config.hooks?.onSuccess, "onSuccess", event)
+
+		return result
 	}
 
-	const queues = [...new Set(handlers.map((handler) => handler.definition.queue))]
-	const consumers = await Promise.all(queues.map((queue) => driver.consume({ queue, run })))
+	async function report(event: JobEvent, delivery: JobDelivery, error: unknown): Promise<void> {
+		const failure: JobFailureEvent = { ...event, error: serializeError(error) }
+
+		await notify(config.hooks?.onAttemptFailed, "onAttemptFailed", failure)
+
+		if (!isFinal(delivery, error)) {
+			return
+		}
+
+		await notify(config.hooks?.onDead, "onDead", failure)
+	}
+
+	function runOn(queue: string): ConsumeRequest["run"] {
+		return async (delivery) => {
+			const envelope = envelopeOf(delivery)
+
+			const event: JobEvent = {
+				name: envelope.name,
+				queue,
+				id: delivery.id,
+				attempt: delivery.attempt,
+				origin: envelope.origin,
+			}
+
+			return dispatch(envelope, event, delivery).catch(async (error: unknown) => {
+				await report(event, delivery, error)
+
+				throw error
+			})
+		}
+	}
+
+	const consumers = await openConsumers(
+		config.driver,
+		queues.map((queue) => consumeRequest(queue, options?.queues?.[queue], runOn(queue))),
+	)
 
 	return {
 		async close() {

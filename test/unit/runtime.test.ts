@@ -130,3 +130,49 @@ describe("start", () => {
 		expect(failure).toBeInstanceOf(UnrecoverableError)
 	})
 })
+
+describe("start boot checks", () => {
+	test("refuses two handlers sharing a job name, before opening a consumer", async () => {
+		const driver = recordingDriver()
+
+		const twin = defineJob({
+			name: "email.send",
+			queue: "mail.retry",
+			payload: type({ to: "string.email", subject: "string" }),
+		})
+
+		const failure = await createJobs({ driver })
+			.start([defineHandler(sendEmail, async () => {}), defineHandler(twin, async () => {})])
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("email.send")
+		expect(driver.consuming).toEqual([])
+	})
+
+	test("refuses a registered definition that no handler runs on a started queue", async () => {
+		const driver = recordingDriver()
+
+		const forgotten = defineJob({
+			name: "email.digest",
+			queue: "mail",
+			payload: type({ to: "string.email" }),
+		})
+
+		const failure = await createJobs({ driver, definitions: [sendEmail, forgotten] })
+			.start([defineHandler(sendEmail, async () => {})])
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("email.digest")
+		expect(driver.consuming).toEqual([])
+	})
+
+	test("ignores a registered definition whose queue no handler started", async () => {
+		const driver = recordingDriver()
+
+		await createJobs({ driver, definitions: [sendEmail, chargeCard] }).start([
+			defineHandler(sendEmail, async () => {}),
+		])
+
+		expect(driver.consuming).toEqual(["mail"])
+	})
+})

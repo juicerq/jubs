@@ -123,12 +123,117 @@ test("welcoming a user sends one email", async () => {
 
 The memory driver does not simulate the clock, delays, backoff, retries, priority ordering, uniqueness windows, schedules or stalled recovery. Jobs run first in, first out, always on attempt 1, and a failing handler throws out of `drain()` instead of being retried. Anything time-dependent is only testable against `redisDriver`.
 
-Of the delivery options, only `attempts` reaches your handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored — the memory driver takes the whole base `Delivery` without complaint.
+It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and `keepFailedCount`, but only `attempts` reaches your handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored. Per-queue `concurrency` is accepted and ignored too — jobs run inline, one at a time.
 
-An option outside that set is what throws. The error names the option and sends you to `redisDriver`, so a delivery behaviour this driver never learns to simulate fails loudly on enqueue instead of passing a test it would fail in production.
+Everything else throws, and that is the point. `delayMs` and a queue `limiter` are time-dependent, so the memory driver refuses them instead of pretending. The error names the option and sends you to `redisDriver`, so a behaviour this driver never learns to simulate fails loudly instead of passing a test it would fail in production.
 
 ## Payload validation on both sides
 
 The payload is validated twice — once on enqueue, and again when the job runs. The second check matters because the job may have been written by an older deploy.
 
 A job whose stored payload no longer validates fails unrecoverably: it burns one attempt and is not retried. So does a job whose name no handler owns. Retrying either would only fail the same way five more times.
+
+## What `start` checks at boot
+
+A worker whose wiring is wrong should die at boot, not at three in the morning on the one job nobody tested. `start` runs three checks before it opens a single worker, and each error says what to change.
+
+Two handlers sharing a job name is the first. Only one of them could ever run, and which one would depend on array order.
+
+A definition registered on a started queue with no handler is the second. Register your definitions to get it:
+
+```ts
+import { createJobs, redisDriver } from "@juicerq/juibs"
+import * as definitions from "./jobs/definitions"
+
+const jobs = createJobs({
+	driver: redisDriver(connection),
+	definitions: Object.values(definitions),
+})
+```
+
+Now a worker that starts the `mail` queue must own a handler for every definition on `mail`. A definition on a queue this process does not start is ignored, so splitting queues across processes stays legal. Without `definitions`, this check has nothing to check and is skipped.
+
+A connection created without `maxRetriesPerRequest: null` is the third, described above.
+
+Tuning aimed at a queue this process does not start is the fourth: a typo in `start(handlers, { queues })` would otherwise swallow your concurrency and your limiter without a word, so the error names the key and lists the queues that did start.
+
+## Delivery policy
+
+`delivery` on a definition says how the job is delivered: how many attempts it gets, how it backs off, how it is prioritised, how long its record is kept, and whether it waits before becoming available. It lives with the definition, so every enqueue of that job gets the same policy — no delivery options at the call site.
+
+| Option | Default | What it does |
+| --- | --- | --- |
+| `attempts` | `5` | How many attempts in total, the first one included |
+| `backoff` | `{ type: "exponential", delayMs: 2000 }` | Wait before a retry, doubling each attempt |
+| `priority` | `20` | Smaller runs first; leave room on both sides |
+| `keepCompletedForMs` | `3600000` | How long a completed job stays in Redis |
+| `keepFailedCount` | `200` | How many failed jobs stay in Redis |
+| `delayMs` | none | Wait this long before the job becomes available |
+
+You override only what you name. Anything you leave out keeps its default.
+
+```ts
+export const chargeCard = defineJob({
+	name: "billing.charge",
+	queue: "billing",
+	payload: type({ userId: "string", cents: "number" }),
+	delivery: { attempts: 8, delayMs: 5_000 },
+})
+```
+
+The function form decides per payload. It receives the **validated** payload as `data` and the resolved defaults as `options`, so you can spread what you do not want to think about:
+
+```ts
+export const sendReport = defineJob({
+	name: "report.send",
+	queue: "reports",
+	payload: type({ userId: "string", size: "number" }),
+	delivery: ({ data, options }) => ({
+		priority: data.size > 10_000 ? options.priority + 10 : options.priority,
+		attempts: 3,
+	}),
+})
+```
+
+`delayMs` is the one option the memory driver refuses, because a fake clock that resolves instantly would turn a delay into a green test and a production surprise. Test a delay against `redisDriver`.
+
+## Hooks
+
+Hooks are the observability path. They are declared once on the client, fire on every execution the runtime performs, and are driver-agnostic — the memory driver fires them too, so a test can assert what your metrics would record.
+
+```ts
+const jobs = createJobs({
+	driver: redisDriver(connection),
+	hooks: {
+		onStart: (event) => metrics.increment("job.start", { job: event.name }),
+		onSuccess: (event) => metrics.increment("job.success", { job: event.name }),
+		onAttemptFailed: (event) => logger.warn(event.error.message, event),
+		onDead: (event) => pager.alert(`${event.name} gave up`, event.error),
+	},
+})
+```
+
+Every event carries `name`, `queue`, `id`, `attempt` and `origin`. `onAttemptFailed` and `onDead` add `error`, serialised as `{ name, message, stack, cause? }`, with `cause` one level deep — an error's cause is kept, its cause's cause is not.
+
+The two failure hooks answer different questions. `onAttemptFailed` fires on **every** failed attempt, so five attempts fire it five times; it is your noise-tolerant log line. `onDead` fires **once**, only when the job gives up — the last attempt failed, or the handler threw BullMQ's `UnrecoverableError`. That is the one worth paging on. `onDead` fires whether or not a dead queue is configured.
+
+A job that never becomes an execution fires nothing: a stored value that is not a juibs envelope has no job name to report. A job whose name no handler owns is the other way round — the envelope names it, so it fires `onAttemptFailed` and `onDead` without ever firing `onStart`.
+
+A hook that throws never changes the job's outcome. juibs reports it on `console.error` and carries on: a broken metrics client must not fail a job that worked. Hooks are awaited, so an async hook finishes before the execution ends.
+
+## Per-queue tuning
+
+Definitions sharing a queue share its concurrency budget. One slow job type starves the others — head-of-line blocking. `start` takes the two levers per queue:
+
+```ts
+const runtime = await jobs.start(handlers, {
+	queues: {
+		mail: { concurrency: 50 },
+		reports: { concurrency: 2, limiter: { max: 10, durationMs: 1_000 } },
+	},
+})
+```
+
+`concurrency` is how many jobs that queue's worker runs at once. It defaults to 10. `limiter` is BullMQ's native rate limiter: at most `max` jobs started per `durationMs`, across every worker on that queue. Use it for a queue that talks to an API with a published rate limit.
+
+Tuning is not the remedy for head-of-line blocking, though — it only moves the budget around. The remedy is to give the hot job type its own queue, by changing `queue` on its definition. A queue is a string, it costs nothing to create, and a slow PDF render then has no way to hold up a password reset.
