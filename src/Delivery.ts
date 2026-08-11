@@ -72,7 +72,7 @@ function resolveDelayMs(delayMs: number | undefined, unique?: ResolvedUnique): n
 	return Math.max(delayMs ?? 0, unique.ttlMs)
 }
 
-export function resolveDelivery(definition: JobDefinition, data: unknown): Delivery {
+function resolve(definition: JobDefinition, data: unknown, keepUnique: boolean): Delivery {
 	const policy = definition.delivery
 
 	if (!policy) {
@@ -90,7 +90,7 @@ export function resolveDelivery(definition: JobDefinition, data: unknown): Deliv
 		keepFailedCount: overrides.keepFailedCount ?? DELIVERY_DEFAULTS.keepFailedCount,
 	}
 
-	const unique = overrides.unique ? resolveUnique(overrides.unique, data) : undefined
+	const unique = keepUnique && overrides.unique ? resolveUnique(overrides.unique, data) : undefined
 	const delivery = unique ? { ...resolved, unique } : resolved
 	const delayMs = resolveDelayMs(overrides.delayMs, unique)
 
@@ -99,4 +99,12 @@ export function resolveDelivery(definition: JobDefinition, data: unknown): Deliv
 	}
 
 	return { ...delivery, delayMs }
+}
+
+export function resolveDelivery(definition: JobDefinition, data: unknown): Delivery {
+	return resolve(definition, data, true)
+}
+
+export function resolveReplayDelivery(definition: JobDefinition, data: unknown): Delivery {
+	return resolve(definition, data, false)
 }

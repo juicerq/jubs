@@ -19,9 +19,22 @@ export function recordingDriver(): RecordingDriver {
 	const consumers = new Map<string, ConsumeRequest["run"]>()
 	let delivered = 0
 
+	function unsupported(): Promise<never> {
+		return Promise.reject(
+			new Error("recordingDriver keeps no dead queue — test the dead queue against memoryDriver"),
+		)
+	}
+
 	return {
 		enqueued,
 		consumed,
+
+		dead: {
+			bury: unsupported,
+			list: unsupported,
+			read: unsupported,
+			remove: unsupported,
+		},
 
 		get consuming() {
 			return [...consumers.keys()]

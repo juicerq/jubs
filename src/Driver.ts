@@ -1,3 +1,4 @@
+import type { DeadEntry } from "@/Dead"
 import type { Delivery } from "@/Delivery"
 import type { Envelope } from "@/Envelope"
 
@@ -34,7 +35,15 @@ export interface Consumer {
 	close(): Promise<void>
 }
 
+export interface DeadStore {
+	bury(queue: string, entry: DeadEntry): Promise<void>
+	list(queue: string): Promise<readonly { id: string; entry: DeadEntry }[]>
+	read(queue: string, id: string): Promise<DeadEntry | undefined>
+	remove(queue: string, id: string): Promise<boolean>
+}
+
 export interface JobDriver {
 	enqueue(request: EnqueueRequest): Promise<EnqueuedJob>
 	consume(request: ConsumeRequest): Promise<Consumer>
+	readonly dead: DeadStore
 }

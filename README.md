@@ -275,6 +275,49 @@ A job that never becomes an execution fires nothing: a stored value that is not 
 
 A hook that throws never changes the job's outcome. juibs reports it on `console.error` and carries on: a broken metrics client must not fail a job that worked. Hooks are awaited, so an async hook finishes before the execution ends.
 
+## Dead queue
+
+A dead queue holds the jobs of one queue that failed every attempt, so a human can read them and run them again. It is consumed by nobody: `<queue>.dead` exists to be inspected, not worked.
+
+It is opt-in, because it stores a second copy of the payload in Redis. `keepFailedCount` already keeps the last 200 failed jobs, and for most queues that window is enough. Turn the dead queue on for the queue whose jobs must not be lost when that window rolls over — a payment capture, an invoice, anything you would have to reconstruct by hand.
+
+```ts
+const jobs = createJobs({
+	driver: redisDriver(connection),
+	definitions: Object.values(definitions),
+	deadQueues: ["billing"],
+})
+```
+
+Name the queue, not the job. Every definition on `billing` is kept the moment it gives up — its last attempt failed, or its handler threw `UnrecoverableError`.
+
+Two checks guard the wiring. When you register `definitions`, `createJobs` refuses a dead queue no definition uses, because a typo would otherwise keep nothing and say nothing. And `start` refuses to open a worker on `billing.dead` itself, because a worker there would eat the copies you meant to keep.
+
+What is kept is the envelope, the serialised error and a reason: `attempts_exhausted` or `unrecoverable`.
+
+```ts
+const dead = await jobs.dead.list("billing")
+
+for (const job of dead) {
+	console.log(job.id, job.envelope.name, job.reason, job.error.message)
+}
+
+await jobs.dead.replay(dead[0].id)
+await jobs.dead.discard(dead[1].id)
+```
+
+`id` is opaque — it names the queue and the stored job together. Read it from `list` and pass it back; do not build one.
+
+`replay` enqueues the job again from the stored envelope, so it runs with the payload it was first given, then drops the dead entry. It needs the definition, so the client that replays must register it in `createJobs({ definitions })` — the dead entry stores a job name, and only the definition knows the queue and the delivery policy that name gets today. `discard` drops the entry and enqueues nothing.
+
+A replay ignores `unique`. The key of a dead job is often still taken — by the dead job itself — and honouring it would drop the replay in silence, which is the one outcome a dead queue exists to prevent. For the same reason a replayed `keepLast` job does not sit out its window: you asked for this job now.
+
+Replay and discard are at-least-once, like every delivery here. Two operators acting on the same dead id at the same moment can both succeed — two replays enqueue the job twice, and a replay racing a discard can do both. Nothing is lost, but a handler can run twice, so keep your handlers safe to repeat. An idempotency key is the coming remedy.
+
+Writing to the dead queue never changes a job's outcome. If Redis refuses the write, juibs reports it on `console.error` and the job still fails the way it would have.
+
+`onDead` is separate, and fires whether or not a dead queue is configured. The hook is the page; the dead queue is the copy you replay from.
+
 ## Per-queue tuning
 
 Definitions sharing a queue share its concurrency budget. One slow job type starves the others — head-of-line blocking. `start` takes the two levers per queue:

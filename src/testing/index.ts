@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import type { DeadEntry } from "@/Dead"
 import type { JobDefinition } from "@/Definition"
 import type { ConsumeRequest, JobDriver } from "@/Driver"
 import type { Envelope } from "@/Envelope"
@@ -24,6 +25,11 @@ interface MemoryJob {
 	readonly envelope: Envelope
 }
 
+interface MemoryDeadQueue {
+	readonly entries: Map<string, DeadEntry>
+	deaths: number
+}
+
 export interface MemoryDriver extends JobDriver {
 	enqueued<Payload extends StandardSchemaV1>(
 		definition: JobDefinition<Payload>,
@@ -39,7 +45,8 @@ export interface MemoryDriver extends JobDriver {
  * uniqueness windows, schedules or stalled recovery. Jobs run first in, first out,
  * always on attempt 1, and a failing handler propagates its error to the caller
  * instead of being retried. Anything time-dependent is only testable against
- * `redisDriver`.
+ * `redisDriver`. The dead queue is simulated, because keeping, listing, replaying
+ * and discarding a dead job depends on no clock.
  *
  * It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and
  * `keepFailedCount`, but only `attempts` reaches the handler, as `maxAttempts`.
@@ -58,6 +65,21 @@ export function memoryDriver(): MemoryDriver {
 	const recorded: MemoryJob[] = []
 	const pending: MemoryJob[] = []
 	const consumers = new Map<string, ConsumeRequest["run"]>()
+	const buried = new Map<string, MemoryDeadQueue>()
+
+	function deadQueueFor(queue: string): MemoryDeadQueue {
+		const open = buried.get(queue)
+
+		if (open) {
+			return open
+		}
+
+		const opened: MemoryDeadQueue = { entries: new Map(), deaths: 0 }
+
+		buried.set(queue, opened)
+
+		return opened
+	}
 
 	async function runNext(): Promise<void> {
 		const next = pending[0]
@@ -117,6 +139,33 @@ export function memoryDriver(): MemoryDriver {
 					consumers.delete(request.queue)
 				},
 			}
+		},
+
+		dead: {
+			async bury(queue, entry) {
+				const dead = deadQueueFor(queue)
+
+				dead.deaths += 1
+				dead.entries.set(String(dead.deaths), JSON.parse(JSON.stringify(entry)) as DeadEntry)
+			},
+
+			async list(queue) {
+				const dead = buried.get(queue)
+
+				if (!dead) {
+					return []
+				}
+
+				return [...dead.entries].map(([id, entry]) => ({ id, entry }))
+			},
+
+			async read(queue, id) {
+				return buried.get(queue)?.entries.get(id)
+			},
+
+			async remove(queue, id) {
+				return buried.get(queue)?.entries.delete(id) ?? false
+			},
 		},
 
 		enqueued<Payload extends StandardSchemaV1>(definition: JobDefinition<Payload>) {

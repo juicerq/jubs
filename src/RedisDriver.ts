@@ -6,6 +6,7 @@ import {
 	Worker,
 	type WorkerOptions,
 } from "bullmq"
+import { type DeadEntry, deadQueueName } from "@/Dead"
 import type { Delivery, ResolvedUnique } from "@/Delivery"
 import type { ConsumeRequest, JobDriver } from "@/Driver"
 
@@ -117,6 +118,42 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			}
 
 			return { id: job.id }
+		},
+
+		dead: {
+			async bury(queue, entry) {
+				await queueFor(deadQueueName(queue)).add(entry.envelope.name, entry)
+			},
+
+			async list(queue) {
+				const waiting = await queueFor(deadQueueName(queue)).getWaiting()
+
+				return waiting.flatMap((job) =>
+					job.id ? [{ id: job.id, entry: job.data as DeadEntry }] : [],
+				)
+			},
+
+			async read(queue, id) {
+				const job = await queueFor(deadQueueName(queue)).getJob(id)
+
+				if (!job) {
+					return undefined
+				}
+
+				return job.data as DeadEntry
+			},
+
+			async remove(queue, id) {
+				const job = await queueFor(deadQueueName(queue)).getJob(id)
+
+				if (!job) {
+					return false
+				}
+
+				await job.remove()
+
+				return true
+			},
 		},
 
 		async consume(request) {

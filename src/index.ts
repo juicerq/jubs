@@ -1,4 +1,5 @@
 export { createJobs, type JobsClient, type JobsConfig } from "@/Client"
+export type { DeadEntry, DeadJob, DeadReason } from "@/Dead"
 export {
 	defineHandler,
 	defineJob,
@@ -12,6 +13,7 @@ export { DELIVERY_DEFAULTS, type Delivery, type DeliveryPolicy } from "@/Deliver
 export type {
 	ConsumeRequest,
 	Consumer,
+	DeadStore,
 	EnqueuedJob,
 	EnqueueRequest,
 	JobDelivery,

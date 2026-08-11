@@ -1,5 +1,6 @@
 import { UnrecoverableError } from "bullmq"
 import type { JobsConfig } from "@/Client"
+import { type DeadReason, deadQueueName } from "@/Dead"
 import type { JobDefinition, JobHandler } from "@/Definition"
 import type { ConsumeRequest, Consumer, JobDelivery, JobDriver, QueueLimiter } from "@/Driver"
 import { type Envelope, readEnvelope } from "@/Envelope"
@@ -38,8 +39,16 @@ function envelopeOf(delivery: JobDelivery): Envelope {
 	}
 }
 
-function isFinal(delivery: JobDelivery, error: unknown): boolean {
-	return error instanceof UnrecoverableError || delivery.attempt >= delivery.maxAttempts
+function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
+	if (error instanceof UnrecoverableError) {
+		return "unrecoverable"
+	}
+
+	if (delivery.attempt >= delivery.maxAttempts) {
+		return "attempts_exhausted"
+	}
+
+	return undefined
 }
 
 function handlersByName(handlers: JobHandler[]): Map<string, JobHandler> {
@@ -95,6 +104,19 @@ function assertEveryTunedQueueStarted(tuned: string[], queues: string[]): void {
 	)
 }
 
+function assertNoQueueConsumesADeadQueue(deadQueues: Set<string>, queues: string[]): void {
+	const started = new Set(queues)
+	const guarded = [...deadQueues].find((queue) => started.has(deadQueueName(queue)))
+
+	if (!guarded) {
+		return
+	}
+
+	throw new Error(
+		`juibs: start() would open a worker on "${deadQueueName(guarded)}", which is the dead queue of "${guarded}" — a dead queue is consumed by nobody, so rename that queue or drop "${guarded}" from createJobs({ deadQueues })`,
+	)
+}
+
 async function openConsumers(driver: JobDriver, requests: ConsumeRequest[]): Promise<Consumer[]> {
 	const settled = await Promise.allSettled(requests.map((request) => driver.consume(request)))
 
@@ -137,9 +159,11 @@ export async function startRuntime(
 ): Promise<JobsRuntime> {
 	const byName = handlersByName(handlers)
 	const queues = [...new Set(handlers.map((handler) => handler.definition.queue))]
+	const deadQueues = new Set(config.deadQueues ?? [])
 
 	assertEveryDefinitionRuns(config.definitions ?? [], byName, queues)
 	assertEveryTunedQueueStarted(Object.keys(options?.queues ?? {}), queues)
+	assertNoQueueConsumesADeadQueue(deadQueues, queues)
 
 	async function dispatch(
 		envelope: Envelope,
@@ -172,13 +196,31 @@ export async function startRuntime(
 		return result
 	}
 
-	async function report(event: JobEvent, delivery: JobDelivery, error: unknown): Promise<void> {
+	async function report(
+		envelope: Envelope,
+		event: JobEvent,
+		delivery: JobDelivery,
+		error: unknown,
+	): Promise<void> {
 		const failure: JobFailureEvent = { ...event, error: serializeError(error) }
 
 		await notify(config.hooks?.onAttemptFailed, "onAttemptFailed", failure)
 
-		if (!isFinal(delivery, error)) {
+		const reason = deadReason(delivery, error)
+
+		if (!reason) {
 			return
+		}
+
+		if (deadQueues.has(event.queue)) {
+			await config.driver.dead
+				.bury(event.queue, { envelope, error: failure.error, reason })
+				.catch((refused: unknown) => {
+					console.error(
+						`juibs: the dead queue did not keep job "${event.name}"; the job outcome is unchanged`,
+						refused,
+					)
+				})
 		}
 
 		await notify(config.hooks?.onDead, "onDead", failure)
@@ -197,7 +239,7 @@ export async function startRuntime(
 			}
 
 			return dispatch(envelope, event, delivery).catch(async (error: unknown) => {
-				await report(event, delivery, error)
+				await report(envelope, event, delivery, error)
 
 				throw error
 			})
