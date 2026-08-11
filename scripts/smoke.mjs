@@ -4,7 +4,12 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 
-const subpaths = [".", "./testing", "./dashboard"]
+const entries = {
+	".": ["createJobs", "defineJob", "defineHandler", "redisDriver"],
+	"./testing": ["JuibsTesting"],
+	"./dashboard": ["JuibsDashboard"],
+}
+const subpaths = Object.keys(entries)
 const root = fileURLToPath(new URL("..", import.meta.url))
 const runtime = typeof Bun === "undefined" ? `node ${process.version}` : `bun ${Bun.version}`
 
@@ -37,13 +42,13 @@ function findTarball(directory) {
 const check = `
 const seen = new Map()
 
-for (const subpath of ${JSON.stringify(subpaths)}) {
+for (const [subpath, expected] of Object.entries(${JSON.stringify(entries)})) {
 	const specifier = \`@juicerq/juibs\${subpath.slice(1)}\`
 	const namespace = await import(specifier)
-	const value = Object.values(namespace)[0]
+	const missing = expected.filter((name) => namespace[name] === undefined)
 
-	if (typeof value !== "object" || value === null) {
-		throw new Error(\`\${subpath} exported \${typeof value}, expected an object\`)
+	if (missing.length) {
+		throw new Error(\`\${subpath} is missing \${missing.join(", ")}\`)
 	}
 
 	const resolved = import.meta.resolve(specifier)
