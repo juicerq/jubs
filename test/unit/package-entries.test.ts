@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { JuibsDashboard } from "@/dashboard/index"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
-import { JuibsTesting } from "@/testing/index"
+import { memoryDriver } from "@/testing/index"
 
 describe("package entries", () => {
 	test("the root subpath exposes the job-core surface", () => {
@@ -11,8 +11,11 @@ describe("package entries", () => {
 		expect(typeof redisDriver).toBe("function")
 	})
 
+	test("the testing subpath exposes the memory driver", () => {
+		expect(typeof memoryDriver).toBe("function")
+	})
+
 	test("every other subpath exposes its namespace", () => {
-		expect(JuibsTesting).toEqual({})
 		expect(JuibsDashboard).toEqual({})
 	})
 })

@@ -97,6 +97,36 @@ juibs installs no signal handler of its own. Shutdown is yours, and it is two st
 
 A process that only enqueues has nothing to close. Its queue handles hold no socket of their own, so quitting your connection is enough.
 
+## Testing
+
+`@juicerq/juibs/testing` exports `memoryDriver()`. It satisfies the same driver interface as `redisDriver`, so a test builds its client the same way the worker does — with the real payload validation and the real name-to-handler dispatch, in milliseconds, with no Redis.
+
+`enqueue` only records. Nothing runs until you ask: `drain()` runs every pending job and returns how many ran, `runNext()` runs the oldest one, and `enqueued(definition)` returns the payloads enqueued for that definition, exactly as they were passed in.
+
+```ts
+import { createJobs, defineHandler } from "@juicerq/juibs"
+import { memoryDriver } from "@juicerq/juibs/testing"
+import { expect, test } from "bun:test"
+import { sendWelcomeEmail } from "./jobs/definitions"
+
+test("welcoming a user sends one email", async () => {
+	const driver = memoryDriver()
+	const jobs = createJobs({ driver })
+
+	await jobs.start([defineHandler(sendWelcomeEmail, async (data) => mailer.send(data.userId))])
+	await jobs.enqueue(sendWelcomeEmail, { userId: "u_1", locale: "pt" })
+
+	expect(driver.enqueued(sendWelcomeEmail)).toEqual([{ userId: "u_1", locale: "pt" }])
+	expect(await driver.drain()).toBe(1)
+})
+```
+
+The memory driver does not simulate the clock, delays, backoff, retries, priority ordering, uniqueness windows, schedules or stalled recovery. Jobs run first in, first out, always on attempt 1, and a failing handler throws out of `drain()` instead of being retried. Anything time-dependent is only testable against `redisDriver`.
+
+Of the delivery options, only `attempts` reaches your handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored — the memory driver takes the whole base `Delivery` without complaint.
+
+An option outside that set is what throws. The error names the option and sends you to `redisDriver`, so a delivery behaviour this driver never learns to simulate fails loudly on enqueue instead of passing a test it would fail in production.
+
 ## Payload validation on both sides
 
 The payload is validated twice — once on enqueue, and again when the job runs. The second check matters because the job may have been written by an older deploy.

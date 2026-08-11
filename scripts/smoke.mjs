@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url"
 
 const entries = {
 	".": ["createJobs", "defineJob", "defineHandler", "redisDriver"],
-	"./testing": ["JuibsTesting"],
+	"./testing": ["memoryDriver"],
 	"./dashboard": ["JuibsDashboard"],
 }
 const subpaths = Object.keys(entries)
