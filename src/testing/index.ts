@@ -74,6 +74,20 @@ export interface MemoryDriver extends JobDriver {
  * and a lease never expires on its own. A delivery that meets a held lease has
  * to be rescheduled, which needs a clock, so it throws instead: test a held
  * lease, an expired lease and a killed worker against `redisDriver`.
+ *
+ * `context.signal` and `timeoutMs` are enforced by the runtime, not by a driver,
+ * so both work here: a handler that outruns its `timeoutMs` has its signal
+ * aborted and its delivery rejected, and the rejection reaches the caller of
+ * `runNext` or `drain`. A timed-out handler whose definition declares an
+ * `idempotencyKey` keeps its key held until its body ends, so the next delivery
+ * meets a held lease — which this driver cannot reschedule, so it throws.
+ *
+ * Shutdown is where this driver stops. It runs jobs inline on the caller's own
+ * stack, so it satisfies `Consumer.close()` only for as long as the caller
+ * awaits `runNext` or `drain`: nothing is in flight when `close` runs, the
+ * timeout of `close({ timeoutMs })` never expires, and no signal is ever aborted
+ * by a shutdown. The abort path is not reachable here. Test a deploy that cuts a
+ * running handler short against `redisDriver`.
  */
 export function memoryDriver(): MemoryDriver {
 	const recorded: MemoryJob[] = []

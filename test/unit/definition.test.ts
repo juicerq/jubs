@@ -121,6 +121,36 @@ describe("defineJob", () => {
 			schedule: dailyAt("07:00", { data: { to: "ada@example.com", body: "digest" } }),
 		})
 	})
+
+	test("refuses a timeoutMs that is not a positive number", () => {
+		expect(() =>
+			defineJob({ name: "email.send", queue: "mail", payload: emailPayload, timeoutMs: 0 }),
+		).toThrow("email.send")
+
+		expect(() =>
+			defineJob({ name: "email.send", queue: "mail", payload: emailPayload, timeoutMs: -5 }),
+		).toThrow("timeoutMs")
+
+		expect(() =>
+			defineJob({
+				name: "email.send",
+				queue: "mail",
+				payload: emailPayload,
+				timeoutMs: Number.NaN,
+			}),
+		).toThrow("timeoutMs")
+	})
+
+	test("keeps a timeoutMs it accepts", () => {
+		const timed = defineJob({
+			name: "email.send",
+			queue: "mail",
+			payload: emailPayload,
+			timeoutMs: 30_000,
+		})
+
+		expect(timed.timeoutMs).toBe(30_000)
+	})
 })
 
 describe("defineHandler", () => {
@@ -135,7 +165,13 @@ describe("defineHandler", () => {
 
 		await handler.run(
 			{ to: "ada@example.com", subject: "welcome" },
-			{ id: "1", attempt: 1, maxAttempts: 5, origin: "direct" },
+			{
+				id: "1",
+				attempt: 1,
+				maxAttempts: 5,
+				origin: "direct",
+				signal: new AbortController().signal,
+			},
 		)
 
 		expect(seen).toEqual(["welcome"])

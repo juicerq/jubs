@@ -43,3 +43,4 @@ export {
 	type Weekday,
 	weeklyOn,
 } from "@/Schedule"
+export { ShutdownAbortError } from "@/Shutdown"

@@ -21,6 +21,7 @@ import {
 	type KeptResult,
 	LeaseHeldError,
 } from "@/Idempotency"
+import { ShutdownAbortError } from "@/Shutdown"
 
 const SCHEDULER_PREFIX = "juibs."
 
@@ -295,18 +296,18 @@ function toWorkerOptions(request: ConsumeRequest, connection: ConnectionOptions)
 async function reschedule(
 	job: Job,
 	token: string | undefined,
-	held: LeaseHeldError,
+	postponed: LeaseHeldError | ShutdownAbortError,
 ): Promise<never> {
 	if (!token) {
 		throw new Error(
-			`juibs: redis delivered job "${job.name}" without a worker token, and its idempotency key is held by another delivery — juibs cannot reschedule the delivery without the token, so it fails the attempt instead`,
-			{ cause: held },
+			`juibs: redis delivered job "${job.name}" without a worker token, and this delivery asked to be delivered again instead of failing — juibs cannot reschedule it without the token, so it fails the attempt instead`,
+			{ cause: postponed },
 		)
 	}
 
-	await job.moveToDelayed(Date.now() + held.delayMs, token)
+	await job.moveToDelayed(Date.now() + postponed.delayMs, token)
 
-	throw new DelayedError(held.message)
+	throw new DelayedError(postponed.message)
 }
 
 export function redisDriver(connection: ConnectionOptions): JobDriver {
@@ -424,7 +425,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 							envelope: job.data,
 						})
 						.catch((error: unknown) => {
-							if (error instanceof LeaseHeldError) {
+							if (error instanceof LeaseHeldError || error instanceof ShutdownAbortError) {
 								return reschedule(job, token, error)
 							}
 

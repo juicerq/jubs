@@ -171,6 +171,20 @@ describe("idempotency", () => {
 		jest.useRealTimers()
 	})
 
+	test("a body that never settles lets the worker process exit on its own", async () => {
+		const worker = Bun.spawn(["bun", `${import.meta.dir}/support/NeverSettlingBody.ts`], {
+			cwd: `${import.meta.dir}/../..`,
+			stdout: "ignore",
+			stderr: "ignore",
+		})
+
+		const exited = await Promise.race([worker.exited, Bun.sleep(3_000).then(() => "hung" as const)])
+
+		worker.kill()
+
+		expect(exited).toBe(0)
+	})
+
 	test("a handler that throws releases the lease and keeps no result", async () => {
 		const driver = recordingDriver()
 
@@ -286,5 +300,80 @@ describe("idempotency", () => {
 
 		expect(await driver.drain()).toBe(2)
 		expect(charged).toEqual([500])
+	})
+})
+
+describe("idempotency under a handler timeout", () => {
+	const slowCharge = defineJob({
+		name: "billing.charge",
+		queue: "billing",
+		payload: type({ orderId: "string", cents: "number" }),
+		idempotencyKey: (data) => data.orderId,
+		timeoutMs: 20,
+	})
+
+	test("holds the lease while the body of a timed-out handler is still running", async () => {
+		const driver = recordingDriver()
+		const body = Promise.withResolvers<{ receipt: string }>()
+
+		await createJobs({ driver }).start([defineHandler(slowCharge, () => body.promise)])
+
+		const failure = await driver
+			.deliver("billing", deliveryOf("order-1"))
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("timeoutMs")
+		expect(driver.released).toEqual([])
+		expect(driver.completed).toEqual([])
+
+		body.resolve({ receipt: "late" })
+		await settleMicrotasks()
+
+		expect(driver.released).toEqual([])
+		expect(driver.completed).toEqual([
+			{ key: keyOf("order-1"), kept: { result: { receipt: "late" } } },
+		])
+	})
+
+	test("releases the lease when the body of a timed-out handler finally throws", async () => {
+		const driver = recordingDriver()
+		const body = Promise.withResolvers<never>()
+
+		await createJobs({ driver }).start([defineHandler(slowCharge, () => body.promise)])
+
+		await driver.deliver("billing", deliveryOf("order-1")).catch(() => {})
+
+		expect(driver.released).toEqual([])
+
+		body.reject(new Error("the card processor is down"))
+		await settleMicrotasks()
+
+		expect(driver.released).toEqual([keyOf("order-1")])
+		expect(driver.completed).toEqual([])
+	})
+
+	test("meets a held lease on the next delivery instead of running a second body", async () => {
+		const driver = memoryDriver()
+		const bodies: number[] = []
+
+		const jobs = createJobs({ driver })
+
+		await jobs.start([
+			defineHandler(slowCharge, async () => {
+				bodies.push(1)
+
+				await Bun.sleep(2_000)
+			}),
+		])
+
+		await jobs.enqueue(slowCharge, { orderId: "order-1", cents: 500 })
+		await jobs.enqueue(slowCharge, { orderId: "order-1", cents: 500 })
+
+		await driver.runNext().catch(() => {})
+
+		const refused = await driver.runNext().catch((error: unknown) => error)
+
+		expect((refused as Error).message).toContain("idempotency lease is held")
+		expect(bodies).toHaveLength(1)
 	})
 })

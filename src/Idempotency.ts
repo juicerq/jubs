@@ -53,6 +53,26 @@ export interface IdempotencyStore {
 	release(request: ReleaseRequest): Promise<void>
 }
 
+/**
+ * What an error says when the delivery it failed left the handler's body running.
+ *
+ * A `timeoutMs` fails the attempt without waiting, because nothing can kill a
+ * running function — so the body stays alive with the key it was given. The
+ * lease has to outlive the delivery and follow the body, or the next delivery
+ * finds the key free and runs a second body beside the first.
+ */
+export interface StillRunning {
+	readonly running: Promise<unknown>
+}
+
+export function stillRunning(error: unknown): Promise<unknown> | undefined {
+	if (!(error instanceof Error) || !("running" in error)) {
+		return undefined
+	}
+
+	return error.running instanceof Promise ? error.running : undefined
+}
+
 export class LeaseHeldError extends Error {
 	readonly delayMs: number
 
@@ -105,7 +125,34 @@ function renewWhileRunning(store: IdempotencyStore, request: RenewRequest): () =
 		})
 	}, IDEMPOTENCY_RENEW_MS)
 
+	renewing.unref?.()
+
 	return () => clearInterval(renewing)
+}
+
+function settleWhenBodyEnds(
+	store: IdempotencyStore,
+	held: ReleaseRequest,
+	running: Promise<unknown>,
+	stop: () => void,
+): void {
+	running
+		.then(
+			(result) =>
+				store.complete({
+					...held,
+					kept: keptResultOf(result),
+					retainForMs: IDEMPOTENCY_RESULT_RETENTION_MS,
+				}),
+			() => store.release(held),
+		)
+		.catch((error: unknown) => {
+			console.error(
+				`juibs: the idempotency lease of "${held.key}" outlived its delivery and could not be settled; the key stays held until it expires`,
+				error,
+			)
+		})
+		.finally(stop)
 }
 
 export async function runUnderKey(
@@ -131,13 +178,23 @@ export async function runUnderKey(
 		(error: unknown) => ({ error }),
 	)
 
-	stop()
-
 	if ("error" in outcome) {
+		const running = stillRunning(outcome.error)
+
+		if (running) {
+			settleWhenBodyEnds(store, { key, token }, running, stop)
+
+			throw outcome.error
+		}
+
+		stop()
+
 		await store.release({ key, token })
 
 		throw outcome.error
 	}
+
+	stop()
 
 	await store.complete({
 		key,

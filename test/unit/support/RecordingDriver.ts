@@ -30,6 +30,7 @@ export interface RecordingDriver extends JobDriver {
 	readonly released: string[]
 	readonly completed: RecordedCompletion[]
 	deliver(queue: string, delivery: JobDelivery): Promise<unknown>
+	refuseClose(): void
 	refuseSchedules(): void
 	keepResult(key: string, kept: KeptResult): void
 	holdLease(key: string, retryInMs: number): void
@@ -37,11 +38,14 @@ export interface RecordingDriver extends JobDriver {
 
 const REFUSED_RECONCILE = "recordingDriver was told to refuse the schedules of this start"
 
+const REFUSED_CLOSE = "recordingDriver was told to refuse the close of this consumer"
+
 export function recordingDriver(): RecordingDriver {
 	const enqueued: RecordedEnqueue[] = []
 	const consumed: ConsumeRequest[] = []
 	const reconciled: ReconcileRequest[] = []
 	let refusing = false
+	let refusingClose = false
 	const consumers = new Map<string, ConsumeRequest["run"]>()
 	const acquired: string[] = []
 	const renewed: string[] = []
@@ -50,6 +54,7 @@ export function recordingDriver(): RecordingDriver {
 	const kept = new Map<string, KeptResult>()
 	const holds = new Map<string, number>()
 	const tokens = new Map<string, string>()
+	const inFlight = new Set<Promise<unknown>>()
 	let delivered = 0
 
 	function unsupported(): Promise<never> {
@@ -69,6 +74,10 @@ export function recordingDriver(): RecordingDriver {
 
 		refuseSchedules() {
 			refusing = true
+		},
+
+		refuseClose() {
+			refusingClose = true
 		},
 
 		keepResult(key, result) {
@@ -165,7 +174,13 @@ export function recordingDriver(): RecordingDriver {
 
 			return {
 				async close() {
+					if (refusingClose) {
+						throw new Error(REFUSED_CLOSE)
+					}
+
 					consumers.delete(request.queue)
+
+					await Promise.allSettled([...inFlight])
 				},
 			}
 		},
@@ -177,7 +192,11 @@ export function recordingDriver(): RecordingDriver {
 				throw new Error(`no consumer is open on queue "${queue}"`)
 			}
 
-			return run(delivery)
+			const running = run(delivery)
+
+			inFlight.add(running)
+
+			return running.finally(() => inFlight.delete(running))
 		},
 	}
 }

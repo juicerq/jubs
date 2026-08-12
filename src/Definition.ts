@@ -12,6 +12,18 @@ export interface HandlerContext {
 	readonly attempt: number
 	readonly maxAttempts: number
 	readonly origin: Origin
+	/**
+	 * Aborts when the job's `timeoutMs` expires, and when `close({ timeoutMs })`
+	 * runs out of patience during a shutdown. `signal.reason` tells the two
+	 * apart: a shutdown aborts with a `ShutdownAbortError`.
+	 *
+	 * Pass it to whatever waits — `fetch`, a database client, another
+	 * `AbortSignal`-aware library — and **throw** once it aborts. A handler that
+	 * returns normally after an abort is recorded as a success, and juibs has no
+	 * way to know the work stopped half done. A handler that finished just before
+	 * the abort should still return: a return is always a success.
+	 */
+	readonly signal: AbortSignal
 }
 
 export interface JobDefinition<Payload extends StandardSchemaV1 = StandardSchemaV1> {
@@ -23,6 +35,7 @@ export interface JobDefinition<Payload extends StandardSchemaV1 = StandardSchema
 	readonly delivery?: DeliveryPolicy
 	readonly schedule?: Schedule
 	readonly idempotencyKey?: (data: unknown) => string
+	readonly timeoutMs?: number
 }
 
 export interface JobDefinitionInput<Payload extends StandardSchemaV1>
@@ -82,19 +95,37 @@ function assertVersioning(
 	throw strayMigration(definition.name, stray, version)
 }
 
+function assertTimeout(definition: Pick<JobDefinition, "name" | "timeoutMs">): void {
+	const { timeoutMs } = definition
+
+	if (timeoutMs === undefined) {
+		return
+	}
+
+	if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+		return
+	}
+
+	throw new Error(
+		`juibs: the job "${definition.name}" declares the \`timeoutMs\` ${timeoutMs} — a timeout is a number of milliseconds above 0, so give it one or drop \`timeoutMs\` to let the handler run for as long as it takes`,
+	)
+}
+
 export function defineJob<Payload extends StandardSchemaV1>(
 	input: JobDefinitionInput<Payload>,
 ): JobDefinition<Payload> {
 	assertVersioning(input)
+	assertTimeout(input)
 
 	const named = { name: input.name, queue: input.queue, payload: input.payload }
 	const versioned = input.version ? { ...named, version: input.version } : named
 	const migrating = input.migrations ? { ...versioned, migrations: input.migrations } : versioned
 	const scheduled = input.schedule ? { ...migrating, schedule: input.schedule } : migrating
+	const timed = input.timeoutMs ? { ...scheduled, timeoutMs: input.timeoutMs } : scheduled
 
 	const definition = input.idempotencyKey
-		? { ...scheduled, idempotencyKey: input.idempotencyKey as (data: unknown) => string }
-		: scheduled
+		? { ...timed, idempotencyKey: input.idempotencyKey as (data: unknown) => string }
+		: timed
 
 	if (!input.delivery) {
 		return definition

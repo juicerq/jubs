@@ -495,6 +495,8 @@ A replay ignores `unique`. The key of a dead job is often still taken — by the
 
 Replay and discard are at-least-once, like every delivery here. Two operators acting on the same dead id at the same moment can both succeed — two replays enqueue the job twice, and a replay racing a discard can do both. Nothing is lost, but a handler can run twice, so keep your handlers safe to repeat. `idempotencyKey` is the remedy — see [Idempotency](#idempotency).
 
+A replay can also run nothing at all, and still report success. It happens to a job whose definition has both `timeoutMs` and `idempotencyKey`. The attempt and the body are judged apart: the attempt failed on its deadline and the job was buried as `attempts_exhausted`, while the detached body kept running and, when it returned, completed that job's idempotency key with its result. A complete key keeps its result for **24 hours**. A replay inside that window meets the complete key, hands the kept result straight back and never calls the handler. Nothing runs, and the replay looks green. So before you trust such a replay, read the effects the handler was supposed to leave — a green replay is not proof it ran. After the 24 hours the key is gone and the next replay runs for real.
+
 Writing to the dead queue never changes a job's outcome. If Redis refuses the write, juibs reports it on `console.error` and the job still fails the way it would have.
 
 `onDead` is separate, and fires whether or not a dead queue is configured. The hook is the page; the dead queue is the copy you replay from.
@@ -515,3 +517,84 @@ const runtime = await jobs.start(handlers, {
 `concurrency` is how many jobs that queue's worker runs at once. It defaults to 10. `limiter` is BullMQ's native rate limiter: at most `max` jobs started per `durationMs`, across every worker on that queue. Use it for a queue that talks to an API with a published rate limit.
 
 Tuning is not the remedy for head-of-line blocking, though — it only moves the budget around. The remedy is to give the hot job type its own queue, by changing `queue` on its definition. A queue is a string, it costs nothing to create, and a slow PDF render then has no way to hold up a password reset.
+
+## Timeouts and shutdown
+
+A handler that hangs and a deploy that arrives mid-job are the same problem: work that has to be cut off. Both are cut off through one lever, `context.signal`.
+
+### `timeoutMs`
+
+`timeoutMs` on a definition is how long one attempt may take.
+
+```ts
+export const renderReport = defineJob({
+	name: "reports.render",
+	queue: "reports",
+	payload: type({ id: "string" }),
+	timeoutMs: 30_000,
+})
+```
+
+On expiry juibs aborts `context.signal` and fails the attempt at once. It does not wait for the handler. That is the honest limit: nothing can kill a running function in Node, so a handler that ignores its signal keeps running, **detached**, until it returns — and its return goes nowhere, because the attempt has already failed. `timeoutMs` is a deadline on the attempt, not a kill.
+
+A detached body is outside every budget. The moment the attempt fails, BullMQ frees the concurrency slot and starts the next job, while the body runs on **outside** `concurrency`. So with a dependency that hangs, the bodies in flight grow without a ceiling above the number you configured, and the retry of the same job can enter the handler while the previous body is still executing. Without an `idempotencyKey`, a handler that ignores its signal has to tolerate running twice at once.
+
+The failure is an ordinary one: the attempt is retried under the definition's `attempts` and `backoff`, and the job dies to the dead queue when its attempts run out. One case escapes that path. A job whose worker died twice with it active is marked stalled beyond BullMQ's `maxStalledCount`, which defaults to 1 — the next worker kills it while fetching, without ever calling the handler. No hook fires, nothing is written to the dead queue, and the remaining attempts are ignored. The job lands in BullMQ's `failed` set with the reason "job stalled more than allowable limit", visible only in Redis or in a Bull Board.
+
+So pass the signal to whatever waits:
+
+```ts
+export const renderReportHandler = defineHandler(renderReport, async (data, context) => {
+	const response = await fetch(`${API}/reports/${data.id}`, { signal: context.signal })
+
+	return response.json()
+})
+```
+
+`fetch`, `setTimeout`, most database clients and every `AbortSignal`-aware library take one.
+
+**A handler that sees its signal abort must throw.** A handler that returns normally after an abort is recorded as a success, and juibs has no way to know the work stopped half done. A return is still a success for the handler that finished just before the abort — that one is right to return. `signal.reason` tells the two aborts apart: a shutdown aborts with a `ShutdownAbortError`, which juibs exports, and a deadline aborts with an error whose message names the `timeoutMs` it ran past.
+
+### `timeoutMs` with `idempotencyKey`
+
+When a definition has both, the idempotency key follows the **body**, not the attempt. The key stays held, and juibs keeps renewing its lease, for as long as the detached body runs.
+
+That is what stops the second body. Every delivery of the same key while the body lives meets a held lease, so it is rescheduled without spending an attempt — the same path a concurrent delivery already takes. When the body finally returns, the key becomes complete with its result, and the next delivery replays that result instead of doing the work again. When the body throws, the key is released and the next delivery runs it for real.
+
+If the process dies, the renewal stops with it and the lease expires on its own after 30 seconds. That is the same guarantee every lease here carries.
+
+Pairing the two is the remedy for the overlap described above. Reach for it on any job whose `timeoutMs` you expect to fire.
+
+One thing the pair does not reconcile is a job that dies while its body lives. The dead queue judges the **attempt**; the key follows the **body**. A job on its last attempt fails on its deadline and is buried as `attempts_exhausted`, and the body that outlived it then completes the key with its result. Both stand: the dead entry is there to replay, and the key is complete for 24 hours. Replaying that entry inside the window gives back the kept result and calls no handler — see [Dead queue](#dead-queue).
+
+### `close`
+
+`runtime.close()` with no argument is the graceful close: it stops fetching new jobs and waits for every job BullMQ still counts as in flight, however long that takes. It does **not** wait for a body already detached by a `timeoutMs` — that body left the worker's books when its attempt failed, so `close` can resolve, and your process exit, while it is mid-write. If you have jobs that must not be cut mid-write, give them an `idempotencyKey` so a redelivery is safe, or no `timeoutMs` at all.
+
+`runtime.close({ timeoutMs })` puts a ceiling on that wait. It resolves as soon as the in-flight jobs drain, and if the timeout expires first it aborts the signal of every job still running and resolves anyway.
+
+A shutdown abort costs the job nothing. When the handler throws, juibs does not treat it as a failed attempt: no `onAttemptFailed`, no dead queue, no `onDead`. The delivery is put back with `moveToDelayed`, which spends no attempt, and another worker takes it. A handler punished for obeying its signal would be the wrong lesson to teach.
+
+A handler that ignores its signal is the worse case, not the better one. `close` still resolves inside the window, but the job it holds stays active in Redis, and it is recovered only as stalled — once, since `maxStalledCount` defaults to 1. If the process dies before `moveToDelayed` reaches Redis, a cooperative job takes that same stalled path. That is acceptable, and better than burying a job that never failed.
+
+**juibs installs no `SIGTERM` or `SIGINT` handler.** A library that grabbed those would fight your HTTP server, your database pool and your tracer for the same signal. Your process owns its shutdown; juibs gives it a `close` to call. The recommended shape for a worker process:
+
+```ts
+const runtime = await jobs.start(handlers)
+
+async function shutdown(signal: NodeJS.Signals) {
+	console.log(`${signal} received, draining jobs`)
+
+	await runtime.close({ timeoutMs: 25_000 })
+	await connection.quit()
+
+	process.exit(0)
+}
+
+process.once("SIGTERM", shutdown)
+process.once("SIGINT", shutdown)
+```
+
+Set `timeoutMs` below your orchestrator's grace period, not above it. Kubernetes sends `SIGKILL` 30 seconds after `SIGTERM` by default, so 25 seconds leaves the process a few seconds to close its connections and exit on its own terms. A `close` that outlives the grace period is the same as no `close` at all.
+
+`memoryDriver` runs jobs inline on the caller's stack, so nothing is in flight while `close` runs and its abort path is never reached. `timeoutMs` on a definition still works there, and so does the held key a timed-out body keeps — test a deadline against the memory driver, and test a shutdown that cuts a running handler short against `redisDriver`.

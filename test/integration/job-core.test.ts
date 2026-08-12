@@ -83,12 +83,13 @@ describe("job-core over redis", () => {
 		const seen = await ran.promise
 
 		expect(seen.data).toEqual({ to: "ada@example.com", subject: "welcome" })
-		expect(seen.context).toEqual({
+		expect(seen.context).toMatchObject({
 			id: enqueued.id,
 			attempt: 1,
 			maxAttempts: DELIVERY_DEFAULTS.attempts,
 			origin: "direct",
 		})
+		expect(seen.context.signal.aborted).toBe(false)
 
 		const stored = await queue.getJob(enqueued.id)
 

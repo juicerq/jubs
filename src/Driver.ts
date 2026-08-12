@@ -34,6 +34,16 @@ export interface ConsumeRequest {
 }
 
 export interface Consumer {
+	/**
+	 * Stops taking new deliveries, and resolves only once every delivery already
+	 * in flight has settled.
+	 *
+	 * The runtime's `close({ timeoutMs })` is built on that promise: it waits for
+	 * this one, and aborts the signals of the handlers still running only when it
+	 * has waited too long. A `close` that resolved before its deliveries settled
+	 * would report a drain that did not happen, and the runtime would abort
+	 * nothing and let the process exit under a running handler.
+	 */
 	close(): Promise<void>
 }
 

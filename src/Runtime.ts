@@ -14,10 +14,17 @@ import type {
 import { type Envelope, readEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
-import { idempotencyKeyFor, LeaseHeldError, runUnderKey } from "@/Idempotency"
+import {
+	idempotencyKeyFor,
+	LeaseHeldError,
+	runUnderKey,
+	type StillRunning,
+	stillRunning,
+} from "@/Idempotency"
 import { assertVersionIsKnown, migrateEnvelope, VersionAheadError } from "@/Migration"
 import { validatePayload } from "@/Payload"
 import type { Schedule } from "@/Schedule"
+import { ShutdownAbortError } from "@/Shutdown"
 
 export const DEFAULT_CONCURRENCY = 10
 
@@ -32,8 +39,48 @@ export interface StartOptions {
 	readonly queues?: Record<string, QueueTuning>
 }
 
+export interface CloseOptions {
+	readonly timeoutMs?: number
+}
+
 export interface JobsRuntime {
-	close(): Promise<void>
+	close(options?: CloseOptions): Promise<void>
+}
+
+class HandlerTimeoutError extends Error implements StillRunning {
+	readonly running: Promise<unknown>
+
+	constructor(name: string, timeoutMs: number, running: Promise<unknown>) {
+		super(
+			`juibs: the job "${name}" ran past its \`timeoutMs\` of ${timeoutMs}ms — its signal was aborted and the attempt failed, while the handler body kept running`,
+		)
+		this.name = "HandlerTimeoutError"
+		this.running = running
+	}
+}
+
+function runUnderTimeout(
+	definition: Pick<JobDefinition, "name" | "timeoutMs">,
+	controller: AbortController,
+	run: () => Promise<unknown>,
+): Promise<unknown> {
+	const { timeoutMs } = definition
+
+	if (timeoutMs === undefined) {
+		return run()
+	}
+
+	const running = run()
+	const expiry = Promise.withResolvers<never>()
+
+	const timer = setTimeout(() => {
+		const expired = new HandlerTimeoutError(definition.name, timeoutMs, running)
+
+		controller.abort(expired)
+		expiry.reject(expired)
+	}, timeoutMs)
+
+	return Promise.race([running, expiry.promise]).finally(() => clearTimeout(timer))
 }
 
 function unrecoverable(error: unknown): UnrecoverableError {
@@ -248,6 +295,7 @@ export async function startRuntime(
 	const byName = handlersByName(handlers)
 	const queues = [...new Set(handlers.map((handler) => handler.definition.queue))]
 	const deadQueues = new Set(config.deadQueues ?? [])
+	const live = new Map<AbortController, string>()
 
 	assertEveryDefinitionRuns(config.definitions ?? [], byName, queues)
 	assertEveryTunedQueueStarted(Object.keys(options?.queues ?? {}), queues)
@@ -278,13 +326,38 @@ export async function startRuntime(
 			throw unrecoverable(error)
 		})
 
-		const run = () =>
-			handler.run(data, {
-				id: delivery.id,
-				attempt: delivery.attempt,
-				maxAttempts: delivery.maxAttempts,
-				origin: envelope.origin,
-			})
+		const controller = new AbortController()
+
+		const run = () => {
+			live.set(controller, envelope.name)
+
+			return runUnderTimeout(handler.definition, controller, () =>
+				handler.run(data, {
+					id: delivery.id,
+					attempt: delivery.attempt,
+					maxAttempts: delivery.maxAttempts,
+					origin: envelope.origin,
+					signal: controller.signal,
+				}),
+			)
+				.catch((error: unknown) => {
+					const { reason } = controller.signal
+
+					if (!(reason instanceof ShutdownAbortError) || error instanceof UnrecoverableError) {
+						throw error
+					}
+
+					const running = stillRunning(error)
+					const aborted = running ? new ShutdownAbortError(envelope.name, running) : reason
+
+					if (aborted !== error) {
+						aborted.cause = error
+					}
+
+					throw aborted
+				})
+				.finally(() => live.delete(controller))
+		}
 
 		const key = idempotencyKeyFor(handler.definition, data)
 		const result = key ? await runUnderKey(config.driver.idempotency, key, run) : await run()
@@ -337,7 +410,7 @@ export async function startRuntime(
 			}
 
 			return dispatch(envelope, event, delivery).catch(async (error: unknown) => {
-				if (error instanceof LeaseHeldError) {
+				if (error instanceof LeaseHeldError || error instanceof ShutdownAbortError) {
 					throw error
 				}
 
@@ -354,8 +427,35 @@ export async function startRuntime(
 	)
 
 	return {
-		async close() {
-			await Promise.all(consumers.map((consumer) => consumer.close()))
+		async close(options) {
+			const drained = Promise.all(consumers.map((consumer) => consumer.close()))
+			const timeoutMs = options?.timeoutMs
+
+			if (timeoutMs === undefined) {
+				await drained
+				return
+			}
+
+			const expiry = Promise.withResolvers<"expired">()
+			const timer = setTimeout(() => expiry.resolve("expired"), timeoutMs)
+
+			try {
+				const outcome = await Promise.race([drained.then(() => "drained" as const), expiry.promise])
+
+				if (outcome === "drained") {
+					return
+				}
+			} finally {
+				clearTimeout(timer)
+			}
+
+			for (const [controller, name] of live) {
+				controller.abort(new ShutdownAbortError(name))
+			}
+
+			drained.catch((error: unknown) => {
+				console.error("juibs: a consumer left running past close() could not be closed", error)
+			})
 		},
 	}
 }
