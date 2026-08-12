@@ -4,7 +4,7 @@ import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
-import { scoped } from "./namespace"
+import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -90,7 +90,7 @@ describe("handler timeout over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(renderReport, { id: scoped("rep-1") })
-		const finished = await waitForFinished(live, enqueued.id)
+		const finished = await waitForFinished(live, storedId(enqueued))
 
 		expect(entered).toEqual([1, 2])
 		expect(finished.failedReason).toContain("timeoutMs")
@@ -138,7 +138,7 @@ describe("handler timeout over redis", () => {
 
 		await Bun.sleep(700)
 
-		const stored = await live.getJob(enqueued.id)
+		const stored = await live.getJob(storedId(enqueued))
 
 		expect(bodies).toEqual([1])
 		expect(await stored?.getState()).toBe("delayed")
@@ -273,7 +273,7 @@ describe("shutdown over redis", () => {
 
 		expect(await inspectorConnection.get(key)).toStartWith(RUNNING_PREFIX)
 
-		const stored = await live.getJob(enqueued.id)
+		const stored = await live.getJob(storedId(enqueued))
 
 		expect(stored?.attemptsMade).toBe(0)
 		expect(await jobs.dead.list(settlePayment.queue)).toEqual([])
@@ -326,7 +326,7 @@ describe("shutdown over redis", () => {
 		await runtime.close({ timeoutMs: 300 })
 		await Bun.sleep(400)
 
-		const stored = await live.getJob(enqueued.id)
+		const stored = await live.getJob(storedId(enqueued))
 
 		expect(stored).toBeDefined()
 		expect(stored?.attemptsMade).toBe(0)

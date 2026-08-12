@@ -37,6 +37,7 @@ function deliveryOf(orderId: string): JobDelivery {
 	return {
 		id: "42",
 		attempt: 1,
+		attemptsStarted: 1,
 		maxAttempts: 5,
 		envelope: {
 			v: 1,

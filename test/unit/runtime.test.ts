@@ -84,7 +84,9 @@ describe("start", () => {
 			envelope: envelopeFor("email.send", { to: "ada@example.com", subject: "welcome" }),
 		})
 
-		expect(contexts).toMatchObject([{ id: "42", attempt: 3, maxAttempts: 5, origin: "direct" }])
+		expect(contexts).toMatchObject([
+			{ id: "mail:42", attempt: 3, maxAttempts: 5, origin: "direct" },
+		])
 	})
 
 	test("gives the handler a signal that stays unaborted through a normal run", async () => {

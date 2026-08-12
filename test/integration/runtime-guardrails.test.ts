@@ -10,7 +10,7 @@ import {
 	type JobFailureEvent,
 	redisDriver,
 } from "@/index"
-import { scoped } from "./namespace"
+import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -113,7 +113,7 @@ describe("runtime-guardrails over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(sendEmail, { to: "ada@example.com" })
-		const stored = await queue.getJob(enqueued.id)
+		const stored = await queue.getJob(storedId(enqueued))
 
 		expect(stored?.opts.delay).toBe(700)
 		expect(await ran.promise).toBeGreaterThanOrEqual(600)

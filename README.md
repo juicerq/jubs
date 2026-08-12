@@ -50,6 +50,27 @@ export const welcomeEmailHandler = defineHandler(sendWelcomeEmail, async (data, 
 })
 ```
 
+## Typing what a handler returns
+
+`result` is the schema of the value the handler resolves. Like `payload`, it is any Standard Schema validator, and it sits on the definition — so the producer's side of the code knows the shape of the answer without importing the handler.
+
+```ts
+export const renderInvoice = defineJob({
+	name: "invoice.render",
+	queue: "reports",
+	payload: type({ invoiceId: "string" }),
+	result: type({ url: "string.url", bytes: "number" }),
+})
+```
+
+The handler's return type is inferred from it. A definition that declares no `result` returns `unknown`, and juibs validates nothing at all.
+
+The value is validated the moment the handler resolves, before anything is stored. juibs keeps what the schema gives back, never what the handler returned. The handler therefore returns the schema's **input**: a schema that transforms cannot validate its own output, which is the same rule `payload` follows.
+
+The validated value is what the handler's return value becomes. No client method reads it back — `jobs.get` answers with the job's state, not with its result. Underneath it is BullMQ's own `returnvalue`, which juibs does not surface. The one place it comes back to you is a repeated delivery under an [idempotency key](#idempotency): the key replays the validated value, as the JSON projection of it, so a `Date` the schema produced comes back a string. The size limit described there applies to it.
+
+A return value the schema rejects fails the attempt unrecoverably: it burns one attempt and is not retried, exactly as an invalid stored payload does. The failure is yours to fix in code, and five more attempts would only produce it again.
+
 ## The two-process split
 
 A definition carries no handler code, so the process that enqueues never imports the process that runs. This is the point of the library: your web process stays small and cannot accidentally pull in a mail client, a PDF renderer or a payment SDK.
@@ -332,7 +353,11 @@ A key is in one of three states, and the state decides what the delivery does.
 
 Three values are fixed today and configurable by nothing: the lease is **30 seconds**, it is renewed every **10 seconds** while the handler runs, and a complete key keeps its result for **24 hours**. Renewal is why a handler slower than 30 seconds is safe — the lease follows it for as long as it runs.
 
-A kept result has a size limit of **64 KB**. Above it, juibs keeps the completion marker alone: the key still counts as complete, the handler is still skipped, but the repeated delivery gets `undefined` instead of the result. A result JSON cannot serialise is kept the same way. Return a receipt id, not the receipt.
+A kept result is stored as JSON, so a repeated delivery gets the JSON projection of it: a `Date` comes back a string, and anything JSON drops is dropped.
+
+It also has a size limit of **64 KB**. Above it, juibs keeps the completion marker alone: the key still counts as complete, the handler is still skipped, but the repeated delivery gets `undefined` instead of the result. Return a receipt id, not the receipt.
+
+A result JSON cannot serialise at all — a circular object, a `BigInt` — leaves a state juibs cannot repair. juibs keeps the completion marker alone, as above, and reports the job a success: `onSuccess` fires. BullMQ then throws while writing the return value, outside juibs' reach and after the dispatch has returned, so the attempt is failed from under it. The delivery arrives again, meets the complete key, skips the handler and replays the empty marker — which serialises — so the job settles `completed` while still carrying the `failedReason` of the attempt that threw. `onAttemptFailed` and `onDead` never fire, and nothing is buried. On a definition with no key the handler runs again on every attempt and the job ends `failed`. Nothing warns you either way, so return a value JSON can hold.
 
 The lease is what makes this correct, and the reason is worth spelling out. Marking the key before running and skipping it on the repeat would be at-most-once, not idempotent: a worker killed between the mark and the end would leave a key that says done over work that never happened, and every later delivery would report success for a charge nobody made. The lease says *in progress*, not *done*, and it expires — so a killed worker gives the job back instead of losing it.
 
@@ -344,7 +369,7 @@ Hooks see a rescheduled delivery as a start with no end. `onStart` fires before 
 
 A scheduled job reaches exactly-once only through `idempotencyKey`. The occurrence a scheduler produces does not carry `unique`, as described above, so the key is the only exclusion left to it.
 
-The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result, and a failing handler releases the key. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
+The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result — as the JSON projection of it, the same one Redis gives back — and a failing handler releases the key. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
 
 ## Scheduling
 
@@ -450,7 +475,7 @@ const jobs = createJobs({
 
 Every event carries `name`, `queue`, `id`, `attempt` and `origin`. `onAttemptFailed` and `onDead` add `error`, serialised as `{ name, message, stack, cause? }`, with `cause` one level deep — an error's cause is kept, its cause's cause is not.
 
-The two failure hooks answer different questions. `onAttemptFailed` fires on **every** failed attempt, so five attempts fire it five times; it is your noise-tolerant log line. `onDead` fires **once**, only when the job gives up — the last attempt failed, or the handler threw BullMQ's `UnrecoverableError`. That is the one worth paging on. `onDead` fires whether or not a dead queue is configured.
+The two failure hooks answer different questions. `onAttemptFailed` fires on **every** failed attempt, so five attempts fire it five times; it is your noise-tolerant log line. `onDead` fires **once**, only when the job gives up — the last attempt failed, the handler threw BullMQ's `UnrecoverableError`, or the job was cancelled while it ran. That is the one worth paging on. `onDead` fires whether or not a dead queue is configured.
 
 A job that never becomes an execution fires nothing: a stored value that is not a juibs envelope has no job name to report. A job whose name no handler owns is the other way round — the envelope names it, so it fires `onAttemptFailed` and `onDead` without ever firing `onStart`.
 
@@ -470,11 +495,18 @@ const jobs = createJobs({
 })
 ```
 
-Name the queue, not the job. Every definition on `billing` is kept the moment it gives up — its last attempt failed, or its handler threw `UnrecoverableError`.
+Name the queue, not the job. Every definition on `billing` is kept the moment it gives up — its last attempt failed, its handler threw `UnrecoverableError`, or someone cancelled it while it ran.
 
 Two checks guard the wiring. When you register `definitions`, `createJobs` refuses a dead queue no definition uses, because a typo would otherwise keep nothing and say nothing. And `start` refuses to open a worker on `billing.dead` itself, because a worker there would eat the copies you meant to keep.
 
-What is kept is the envelope, the serialised error and a reason: `attempts_exhausted`, `unrecoverable`, or `version_ahead` — the payload was written by a newer deploy than this worker runs.
+What is kept is the envelope, the serialised error and one of four reasons.
+
+| Reason | What died |
+| --- | --- |
+| `attempts_exhausted` | the last attempt failed |
+| `unrecoverable` | the handler threw `UnrecoverableError` |
+| `version_ahead` | the payload was written by a newer deploy than this worker runs |
+| `cancelled` | `jobs.cancel(id)` reached the job while it ran — see [Operations](#operations) |
 
 ```ts
 const dead = await jobs.dead.list("billing")
@@ -598,6 +630,164 @@ process.once("SIGINT", shutdown)
 Set `timeoutMs` below your orchestrator's grace period, not above it. Kubernetes sends `SIGKILL` 30 seconds after `SIGTERM` by default, so 25 seconds leaves the process a few seconds to close its connections and exit on its own terms. A `close` that outlives the grace period is the same as no `close` at all.
 
 `memoryDriver` runs jobs inline on the caller's stack, so nothing is in flight while `close` runs and its abort path is never reached. `timeoutMs` on a definition still works there, and so does the held key a timed-out body keeps — test a deadline against the memory driver, and test a shutdown that cuts a running handler short against `redisDriver`.
+
+## Operations
+
+Five operations act on work already in Redis. `get`, `retry` and `cancel` take a job id. `pause` and `resume` take a queue name.
+
+| Operation | What it does |
+| --- | --- |
+| `jobs.get(id)` | describes the job, or gives back `undefined` |
+| `jobs.retry(id)` | runs a failed job again, from attempt 1 |
+| `jobs.cancel(id)` | removes a job that has not started, or aborts the signal of one that runs |
+| `jobs.pause(queue)` | stops every worker on that queue from taking new jobs |
+| `jobs.resume(queue)` | lets them take jobs again |
+
+### The id
+
+A job id is the queue and the stored job together, as `queue:storedId`. It is the only thing you need to understand before using any of these operations, because the queue inside the id is where the operation looks.
+
+Three places hand you one: `jobs.enqueue` returns it, `jobs.dead.list(queue)` returns it, and `context.id` carries it into the handler and into every hook event.
+
+```ts
+const enqueued = await jobs.enqueue(sendWelcomeEmail, { userId: "u_1", locale: "pt" })
+
+const snapshot = await jobs.get(enqueued.id)
+```
+
+The id is opaque. Read it and pass it back; do not build one.
+
+**A dead job id names the dead queue.** `jobs.dead.list("billing")` gives ids like `billing.dead:12`, because the copy is kept on `billing.dead`. That id serves `dead.replay` and `dead.discard`, and nothing else. `get`, `retry` and `cancel` speak of the live queues only, so a dead id is an absence to them: `get` gives back `undefined` and the other two `unknown_job`. A dead job is not a job — it is the record of one, it runs nothing, and letting `cancel` reach it would destroy the very copy you keep to replay.
+
+An id that is not `queue:storedId` throws, and names what to pass instead. That is a mistake at the call site, not an absent job — see below.
+
+### Absence is typed
+
+An id no job answers to is an ordinary result, never an exception. A job is dropped by `keepCompletedForMs`, by `keepFailedCount`, or by an operator, so asking about one that is gone is normal.
+
+`get` gives back `undefined`. The snapshot it gives back otherwise carries the composed `id`, the `queue`, the job `name`, the `state`, the `envelope`, the `attempts` it has already ended, its `maxAttempts` and the `failure` message of the last attempt that threw.
+
+```ts
+const snapshot = await jobs.get(id)
+
+if (!snapshot) {
+	return
+}
+
+console.log(snapshot.state, snapshot.attempts, snapshot.maxAttempts, snapshot.failure)
+```
+
+`state` is one of `waiting`, `active`, `delayed`, `completed`, `failed`, `waiting_children` or `unknown`. `envelope` is `undefined` when what is stored is not a juibs envelope — a job another producer put on the same queue.
+
+`attempts` is a **count of the attempts that have ended**, not the one under way. A job that never ran reads `0`, and a job running its second attempt reads `1`, because the attempt in flight has not ended. It is not `context.attempt`, which is 1-based and names the attempt the handler is running — the same job reads `1` here and `2` there at the same moment.
+
+`retry` and `cancel` answer with a union you switch on.
+
+```ts
+type RetryResult =
+	| { outcome: "retried" }
+	| { outcome: "unknown_job" }
+	| { outcome: "not_failed"; state: JobState }
+
+type CancelResult =
+	| { outcome: "removed" }
+	| { outcome: "aborting" }
+	| { outcome: "unknown_job" }
+	| { outcome: "finished"; state: JobState }
+```
+
+### `cancel`
+
+What a cancellation does depends on whether the job has started.
+
+**A job that has not started is removed.** It is gone from the queue, `get` stops answering for it, and nothing is written to the dead queue. The result is `removed`.
+
+`removed` says the job is gone, not that it never ran. The state is read and the job is deleted in two steps, so a job that was waiting when it was read and started and finished before the deletion landed is deleted all the same, and the work it did stands. The window is narrow and it is left open on purpose: closing it would cost a lock on every cancellation to buy nothing, because whoever cancels a job racing its own start cannot know which of the two won anyway. The dead queue is declared at-least-once for the same reason.
+
+A job that waits on children is removed with those children. They exist to feed the job you cancelled, and would otherwise finish into a parent that is gone. Nothing in juibs builds a flow today, so this is the rule waiting for `flow`, not one you can meet yet.
+
+**A job that is already running cannot be removed.** BullMQ refuses to remove a job a worker holds the lock on, and juibs does not pretend otherwise. What happens instead is an abort: juibs marks the job, the runtime that holds the delivery aborts `context.signal`, and the handler ends the work itself. The result is `aborting` — the abort was asked for, not that the job has stopped.
+
+```ts
+const cancelled = await jobs.cancel(id)
+
+if (cancelled.outcome === "aborting") {
+	console.log("the handler was asked to stop; read the job again to see how it ended")
+}
+```
+
+The abort crosses processes. The mark goes to Redis, so the client that cancels does not have to be the process that runs the job. It is not instant either: each runtime sweeps its running jobs every 250 milliseconds, so an abort lands within about that.
+
+**A mark names one delivery, not the job.** A job id comes back on every attempt, so a mark that named only the id would abort a delivery nobody cancelled — the retry, or the run a `jobs.retry` asked for. The mark carries the count of deliveries the job has been handed out for, and the sweep hands it to that delivery alone. One that arrives after its delivery ended matches nothing and kills nothing. It is then only garbage, and the 30 second expiry is what sweeps it up.
+
+The two limits of the signal are the same two a shutdown has, and they are the whole honesty of this operation. **A handler that ignores its signal runs to the end**, because nothing in Node can kill a running function. **A handler that notices the abort and returns counts as a success**, because the contract is to throw: rethrow `context.signal.reason`.
+
+```ts
+export const renderReportHandler = defineHandler(renderReport, async (data, context) => {
+	const response = await fetch(`${API}/reports/${data.id}`, { signal: context.signal })
+
+	if (context.signal.aborted) {
+		throw context.signal.reason
+	}
+
+	return response.json()
+})
+```
+
+A cancelled job dies with its own reason. The attempt fails, `onAttemptFailed` and `onDead` both fire, **no further attempt is spent** whatever `attempts` says, and — if the queue is in `deadQueues` — the entry is kept with the reason `cancelled` — see [Dead queue](#dead-queue). The error is a `CancelledError`, which juibs exports. So a job you cancelled by mistake is still there to replay.
+
+A cancellation that arrives after the job settled comes back as `finished`, with the state it settled in. It changes nothing.
+
+### `retry`
+
+`retry` runs a **failed** job again, in place, under the same id, **from attempt 1**. Resetting the attempts is the point: a job that died with its attempts exhausted would otherwise be refused another run by BullMQ, so the operation would look like it worked and nothing would run. `get` reads the `attempts` count back at `0` afterwards, and the job gets its whole `maxAttempts` again.
+
+A job in any other state comes back as `not_failed` with the state it is in, and nothing happens to it. A job Redis no longer keeps comes back as `unknown_job`.
+
+```ts
+const retried = await jobs.retry(id)
+
+if (retried.outcome === "not_failed") {
+	console.log(`nothing to retry — the job is ${retried.state}`)
+}
+```
+
+`retry` and `dead.replay` are different operations on different objects, and the difference decides which one you can use.
+
+| | `jobs.retry(id)` | `jobs.dead.replay(id)` |
+| --- | --- | --- |
+| Acts on | the failed job itself, still in Redis | the copy kept in the dead queue |
+| Id | the live id, from `enqueue` or `context.id` | the dead id, from `dead.list(queue)` |
+| Result | the same job runs again, same id, attempt 1 | a **new** job is enqueued, new id, and the dead entry is dropped |
+| Needs | the job to be inside the `keepFailedCount` window | the definition registered in `createJobs({ definitions })` |
+
+Retry the job while it is still there. Replay it once the failed window has rolled over it — which is the only reason the dead queue exists.
+
+### `pause` and `resume`
+
+**A pause is on the queue, not on the process that asks.** The state lives in Redis, so every worker on that queue stops taking new jobs, in every process — not only in the one that called. Resuming is the same in reverse.
+
+```ts
+await jobs.pause("billing")
+
+await jobs.resume("billing")
+```
+
+A pause stops **fetching**, not the jobs already fetched: what is active when you pause runs to its end. Producers are not affected either — `enqueue` keeps working and the jobs pile up, waiting, until you resume. That is the tool for a broken downstream API: pause, fix, resume, and no job is lost.
+
+### What these operations do not reach
+
+**Clearing a queue does not clear the idempotency keys.** Keys live under `juibs:idem:`, outside the `bull:<queue>:` namespace, so a `queue.obliterate()`, a purge from a Bull Board, a redeploy and a restart all leave them exactly where they were, for the 24 hours a complete key keeps its result. A job you enqueue again right after the purge can meet its own complete key, skip the handler in silence and hand back the result kept from the run before. There is no API to delete one today. Until there is, the way out is to wait the retention out, or to delete the key in Redis by hand.
+
+**A green replay is not proof the work ran.** A job with both `timeoutMs` and `idempotencyKey` can be buried on its deadline while its detached body keeps running and completes the key — and the replay of that entry hands back the kept result without calling the handler. It is described in full under [Dead queue](#dead-queue) and [`timeoutMs` with `idempotencyKey`](#timeoutms-with-idempotencykey).
+
+### The memory driver
+
+`memoryDriver` keeps every job it records, so `get` and `retry` answer for real. Its jobs are only ever `waiting`, `active`, `completed` or `failed` — the four states an inline run passes through — and never `delayed`, `waiting_children` or `unknown`, which need a clock or a queue it does not have. `attempts` counts the runs that ended here, so a job reads `0` before its first run and `1` after it, and climbs only when you run it again — nothing is retried on its own. `retry` puts a failed job back in the pending line, clears its failure and puts the count back to `0`, the way a retry over Redis does.
+
+`cancel` answers with what it knows: a job it has not run is `removed` and stops answering to `get`, a job that finished is `finished`, an unknown id is `unknown_job`, and a job it is running is marked and comes back as `aborting` — a real abort, because the sweep belongs to the runtime, not to a driver. A mark names its delivery here too, so one left behind kills no later delivery. It keeps no clock, so the 30 second expiry is ignored and a mark nobody collects never expires. Nor is there a race between reading a job's state and removing it, since jobs run inline on the caller's stack — so `removed` here really does mean the job never ran. Test the expiry, and a job that turns active under a cancellation, against `redisDriver`.
+
+`pause` and `resume` are simulated where this driver consumes. A paused queue holds its pending jobs back: `runNext` skips them and throws when every pending job sits on a paused queue, and `drain` runs the other queues and counts only what it ran.
 
 ## Development
 

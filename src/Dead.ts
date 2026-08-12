@@ -1,7 +1,7 @@
 import type { Envelope } from "@/Envelope"
 import type { SerializedError } from "@/Failure"
 
-export type DeadReason = "attempts_exhausted" | "unrecoverable" | "version_ahead"
+export type DeadReason = "attempts_exhausted" | "unrecoverable" | "version_ahead" | "cancelled"
 
 export interface DeadEntry {
 	readonly envelope: Envelope
@@ -13,22 +13,20 @@ export interface DeadJob extends DeadEntry {
 	readonly id: string
 }
 
+const DEAD_SUFFIX = ".dead"
+
 export function deadQueueName(queue: string): string {
-	return `${queue}.dead`
+	return `${queue}${DEAD_SUFFIX}`
 }
 
-export function deadJobId(queue: string, storedId: string): string {
-	return `${queue}:${storedId}`
-}
-
-export function readDeadJobId(id: string): { queue: string; storedId: string } {
-	const cut = id.lastIndexOf(":")
-
-	if (cut < 1 || cut === id.length - 1) {
-		throw new Error(
-			`juibs: "${id}" is not a dead job id — pass an id returned by jobs.dead.list(queue)`,
-		)
+/**
+ * Reads back the live queue a dead queue keeps the jobs of, and gives back
+ * `undefined` when the name is not a dead queue's.
+ */
+export function liveQueueName(dead: string): string | undefined {
+	if (!dead.endsWith(DEAD_SUFFIX) || dead.length === DEAD_SUFFIX.length) {
+		return undefined
 	}
 
-	return { queue: id.slice(0, cut), storedId: id.slice(cut + 1) }
+	return dead.slice(0, -DEAD_SUFFIX.length)
 }

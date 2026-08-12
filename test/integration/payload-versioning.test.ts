@@ -3,7 +3,7 @@ import { type } from "arktype"
 import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
-import { scoped } from "./namespace"
+import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -88,7 +88,7 @@ describe("a payload version ahead of this worker, over redis", () => {
 
 		const enqueued = await jobs.enqueue(aheadContact, { email: "ada@example.com" })
 
-		const finished = await waitForFinished(live, enqueued.id)
+		const finished = await waitForFinished(live, storedId(enqueued))
 
 		expect(finished.attemptsMade).toBe(1)
 		expect(await finished.getState()).toBe("failed")
@@ -96,7 +96,7 @@ describe("a payload version ahead of this worker, over redis", () => {
 
 		await Bun.sleep(300)
 
-		const settled = await live.getJob(enqueued.id)
+		const settled = await live.getJob(storedId(enqueued))
 
 		expect(settled?.attemptsMade).toBe(1)
 		expect(await settled?.getState()).toBe("failed")

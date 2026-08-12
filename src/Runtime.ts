@@ -1,4 +1,5 @@
 import { UnrecoverableError } from "bullmq"
+import { CANCEL_SWEEP_MS, CancelledError, type RunningDelivery } from "@/Cancellation"
 import type { JobsConfig } from "@/Client"
 import { type DeadReason, deadQueueName } from "@/Dead"
 import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
@@ -21,8 +22,10 @@ import {
 	type StillRunning,
 	stillRunning,
 } from "@/Idempotency"
+import { composeJobId } from "@/JobId"
 import { assertVersionIsKnown, migrateEnvelope, VersionAheadError } from "@/Migration"
 import { validatePayload } from "@/Payload"
+import { validateResult } from "@/Result"
 import type { Schedule } from "@/Schedule"
 import { ShutdownAbortError } from "@/Shutdown"
 
@@ -100,6 +103,10 @@ function envelopeOf(delivery: JobDelivery): Envelope {
 }
 
 function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
+	if (error instanceof CancelledError) {
+		return "cancelled"
+	}
+
 	if (error instanceof VersionAheadError) {
 		return "version_ahead"
 	}
@@ -287,6 +294,37 @@ function consumeRequest(
 	return { ...request, limiter: tuning.limiter }
 }
 
+/**
+ * A delivery this runtime is running right now.
+ *
+ * Each one is its own entry, held by identity rather than under a key, because
+ * two deliveries of the same job can overlap — a redelivery of a job whose
+ * handler ignored a shutdown abort runs beside the body still going. Keyed by
+ * id, the second would overwrite the first and the first to end would delete
+ * the entry of the other.
+ *
+ * The queue and the stored id sit here because the cancellation sweep asks one
+ * queue at a time, in stored ids.
+ */
+interface LiveDelivery extends RunningDelivery {
+	readonly queue: string
+	readonly name: string
+	readonly controller: AbortController
+}
+
+function liveByQueue(live: Set<LiveDelivery>): Map<string, LiveDelivery[]> {
+	const byQueue = new Map<string, LiveDelivery[]>()
+
+	for (const delivery of live) {
+		const running = byQueue.get(delivery.queue) ?? []
+
+		running.push(delivery)
+		byQueue.set(delivery.queue, running)
+	}
+
+	return byQueue
+}
+
 export async function startRuntime(
 	config: JobsConfig,
 	handlers: JobHandler[],
@@ -295,7 +333,7 @@ export async function startRuntime(
 	const byName = handlersByName(handlers)
 	const queues = [...new Set(handlers.map((handler) => handler.definition.queue))]
 	const deadQueues = new Set(config.deadQueues ?? [])
-	const live = new Map<AbortController, string>()
+	const live = new Set<LiveDelivery>()
 
 	assertEveryDefinitionRuns(config.definitions ?? [], byName, queues)
 	assertEveryTunedQueueStarted(Object.keys(options?.queues ?? {}), queues)
@@ -329,19 +367,42 @@ export async function startRuntime(
 		const controller = new AbortController()
 
 		const run = () => {
-			live.set(controller, envelope.name)
+			const entry: LiveDelivery = {
+				queue: event.queue,
+				id: delivery.id,
+				attemptsStarted: delivery.attemptsStarted,
+				name: envelope.name,
+				controller,
+			}
 
-			return runUnderTimeout(handler.definition, controller, () =>
-				handler.run(data, {
-					id: delivery.id,
+			live.add(entry)
+
+			return runUnderTimeout(handler.definition, controller, async () => {
+				const value = await handler.run(data, {
+					id: event.id,
 					attempt: delivery.attempt,
 					maxAttempts: delivery.maxAttempts,
 					origin: envelope.origin,
 					signal: controller.signal,
-				}),
-			)
+				})
+
+				return validateResult(handler.definition, value).catch((error: unknown) => {
+					throw unrecoverable(error)
+				})
+			})
 				.catch((error: unknown) => {
 					const { reason } = controller.signal
+
+					if (reason instanceof CancelledError) {
+						const body = stillRunning(error)
+						const cancelled = body ? new CancelledError(envelope.name, body) : reason
+
+						if (cancelled !== error) {
+							cancelled.cause = error
+						}
+
+						throw cancelled
+					}
 
 					if (!(reason instanceof ShutdownAbortError) || error instanceof UnrecoverableError) {
 						throw error
@@ -356,7 +417,7 @@ export async function startRuntime(
 
 					throw aborted
 				})
-				.finally(() => live.delete(controller))
+				.finally(() => live.delete(entry))
 		}
 
 		const key = idempotencyKeyFor(handler.definition, data)
@@ -404,7 +465,7 @@ export async function startRuntime(
 			const event: JobEvent = {
 				name: envelope.name,
 				queue,
-				id: delivery.id,
+				id: composeJobId(queue, delivery.id),
 				attempt: delivery.attempt,
 				origin: envelope.origin,
 			}
@@ -421,41 +482,71 @@ export async function startRuntime(
 		}
 	}
 
+	async function sweepCancellations(): Promise<void> {
+		for (const [queue, running] of liveByQueue(live)) {
+			const cancelled = await config.driver.takeCancelled(queue, running)
+
+			for (const delivery of cancelled) {
+				delivery.controller.abort(new CancelledError(delivery.name))
+			}
+		}
+	}
+
 	const consumers = await openConsumers(
 		config.driver,
 		queues.map((queue) => consumeRequest(queue, options?.queues?.[queue], runOn(queue))),
 	)
 
-	return {
-		async close(options) {
-			const drained = Promise.all(consumers.map((consumer) => consumer.close()))
-			const timeoutMs = options?.timeoutMs
+	const sweeping = setInterval(() => {
+		if (live.size === 0) {
+			return
+		}
 
-			if (timeoutMs === undefined) {
-				await drained
+		sweepCancellations().catch((error: unknown) => {
+			console.error("juibs: the cancellations of the running jobs could not be read", error)
+		})
+	}, CANCEL_SWEEP_MS)
+
+	sweeping.unref?.()
+
+	async function drainConsumers(options?: CloseOptions): Promise<void> {
+		const drained = Promise.all(consumers.map((consumer) => consumer.close()))
+		const timeoutMs = options?.timeoutMs
+
+		if (timeoutMs === undefined) {
+			await drained
+			return
+		}
+
+		const expiry = Promise.withResolvers<"expired">()
+		const timer = setTimeout(() => expiry.resolve("expired"), timeoutMs)
+
+		try {
+			const outcome = await Promise.race([drained.then(() => "drained" as const), expiry.promise])
+
+			if (outcome === "drained") {
 				return
 			}
+		} finally {
+			clearTimeout(timer)
+		}
 
-			const expiry = Promise.withResolvers<"expired">()
-			const timer = setTimeout(() => expiry.resolve("expired"), timeoutMs)
+		for (const { name, controller } of live.values()) {
+			controller.abort(new ShutdownAbortError(name))
+		}
 
+		drained.catch((error: unknown) => {
+			console.error("juibs: a consumer left running past close() could not be closed", error)
+		})
+	}
+
+	return {
+		async close(options) {
 			try {
-				const outcome = await Promise.race([drained.then(() => "drained" as const), expiry.promise])
-
-				if (outcome === "drained") {
-					return
-				}
+				await drainConsumers(options)
 			} finally {
-				clearTimeout(timer)
+				clearInterval(sweeping)
 			}
-
-			for (const [controller, name] of live) {
-				controller.abort(new ShutdownAbortError(name))
-			}
-
-			drained.catch((error: unknown) => {
-				console.error("juibs: a consumer left running past close() could not be closed", error)
-			})
 		},
 	}
 }

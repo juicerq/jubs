@@ -12,9 +12,11 @@ import {
 	Worker,
 	type WorkerOptions,
 } from "bullmq"
+import { CANCEL_MARK_TTL_MS, type RunningDelivery } from "@/Cancellation"
 import { type DeadEntry, deadQueueName } from "@/Dead"
 import type { Delivery, ResolvedUnique } from "@/Delivery"
-import type { ConsumeRequest, JobDriver, ScheduleUpsert } from "@/Driver"
+import type { CancelResult, ConsumeRequest, JobDriver, JobState, ScheduleUpsert } from "@/Driver"
+import { type Envelope, readEnvelope } from "@/Envelope"
 import {
 	type IdempotencyLease,
 	type IdempotencyStore,
@@ -25,9 +27,11 @@ import { ShutdownAbortError } from "@/Shutdown"
 
 const SCHEDULER_PREFIX = "juibs."
 
-const IDEMPOTENCY_QUEUE = "juibs.idempotency"
+const SCRIPT_QUEUE = "juibs.scripts"
 
 export const IDEMPOTENCY_KEY_PREFIX = "juibs:idem:"
+
+export const CANCEL_KEY_PREFIX = "juibs:cancel:"
 
 export const RUNNING_PREFIX = "running:"
 
@@ -38,6 +42,8 @@ const RENEW_COMMAND = "juibsIdempotencyRenew"
 const COMPLETE_COMMAND = "juibsIdempotencyComplete"
 
 const RELEASE_COMMAND = "juibsIdempotencyRelease"
+
+const TAKE_CANCELLED_COMMAND = "juibsTakeCancelled"
 
 const ACQUIRE_LUA = `
 local current = redis.call("GET", KEYS[1])
@@ -81,6 +87,22 @@ if redis.call("GET", KEYS[1]) == ARGV[1] then
 end
 
 return 0
+`
+
+const TAKE_CANCELLED_LUA = `
+local taken = {}
+
+for index = 1, #ARGV, 2 do
+  local key = KEYS[1] .. ARGV[index]
+
+  if redis.call("GET", key) == ARGV[index + 1] then
+    redis.call("DEL", key)
+
+    taken[#taken + 1] = (index + 1) / 2
+  end
+end
+
+return taken
 `
 
 function schedulerId(jobName: string): string {
@@ -185,18 +207,70 @@ export function toJobsOptions(delivery: Delivery): JobsOptions {
 	return { ...options, delay: delivery.delayMs }
 }
 
+const JOB_STATES = {
+	waiting: "waiting",
+	prioritized: "waiting",
+	active: "active",
+	delayed: "delayed",
+	completed: "completed",
+	failed: "failed",
+	"waiting-children": "waiting_children",
+	unknown: "unknown",
+} as const satisfies Record<Awaited<ReturnType<Job["getState"]>>, JobState>
+
+function storedEnvelope(stored: unknown): Envelope | undefined {
+	try {
+		return readEnvelope(stored)
+	} catch {
+		return undefined
+	}
+}
+
 export const HELD_RETRY_MS = 1_000
 
-async function openIdempotencyClient(connection: ConnectionOptions): Promise<RedisClient> {
-	const handle = new Queue(IDEMPOTENCY_QUEUE, { connection, skipMetasUpdate: true })
+/**
+ * Whether Redis refused to remove a job because a worker holds its lock.
+ *
+ * A job read as waiting can be taken by a worker before the removal reaches
+ * Redis, and BullMQ then reports the lock in the message of the error it
+ * throws. That job is running, so the cancellation takes the running path
+ * instead of failing the caller.
+ */
+function lockedByAWorker(error: unknown): boolean {
+	return error instanceof Error && error.message.includes("locked by another worker")
+}
+
+async function openScriptClient(connection: ConnectionOptions): Promise<RedisClient> {
+	const handle = new Queue(SCRIPT_QUEUE, { connection, skipMetasUpdate: true })
 	const client = await handle.getBackend().client
 
 	client.defineCommand(ACQUIRE_COMMAND, { numberOfKeys: 1, lua: ACQUIRE_LUA })
 	client.defineCommand(RENEW_COMMAND, { numberOfKeys: 1, lua: RENEW_LUA })
 	client.defineCommand(COMPLETE_COMMAND, { numberOfKeys: 1, lua: COMPLETE_LUA })
 	client.defineCommand(RELEASE_COMMAND, { numberOfKeys: 1, lua: RELEASE_LUA })
+	client.defineCommand(TAKE_CANCELLED_COMMAND, { numberOfKeys: 1, lua: TAKE_CANCELLED_LUA })
 
 	return client
+}
+
+/**
+ * Opens the one client every juibs script runs on, the first time a script
+ * needs it.
+ *
+ * A script juibs registers is not a command BullMQ exposes, so it is declared
+ * once per client with `defineCommand` and called with `runCommand`. The client
+ * comes from a `Queue` handle opened with `skipMetasUpdate`, so the handle
+ * writes no key of its own and every store shares the caller's connection. The
+ * queue it names holds no job and takes no worker.
+ */
+function scriptClient(connection: ConnectionOptions): () => Promise<RedisClient> {
+	let opening: Promise<RedisClient> | undefined
+
+	return () => {
+		opening ??= openScriptClient(connection)
+
+		return opening
+	}
 }
 
 export function readLease(reply: unknown, token: string): IdempotencyLease {
@@ -226,20 +300,8 @@ export function readLease(reply: unknown, token: string): IdempotencyLease {
  * expired under a running handler cannot renew, finish or free the lease that a
  * second worker took after it. `complete` still writes when the key is gone,
  * because nobody holds it then.
- *
- * The client comes from a `Queue` handle opened with `skipMetasUpdate`, so the
- * handle writes no key of its own and the store shares the caller's connection.
- * The queue it names holds no job and takes no worker.
  */
-function redisIdempotency(connection: ConnectionOptions): IdempotencyStore {
-	let opening: Promise<RedisClient> | undefined
-
-	function client(): Promise<RedisClient> {
-		opening ??= openIdempotencyClient(connection)
-
-		return opening
-	}
-
+function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore {
 	function redisKey(key: string): string {
 		return `${IDEMPOTENCY_KEY_PREFIX}${key}`
 	}
@@ -280,6 +342,35 @@ function redisIdempotency(connection: ConnectionOptions): IdempotencyStore {
 	}
 }
 
+/**
+ * The prefix every cancellation mark of one queue is written under.
+ *
+ * The queue name sits in a hash tag, so every mark of one queue lands in one
+ * Redis Cluster slot: the marks are read one queue at a time, and the Lua
+ * script derives its keys from the single key it declares.
+ */
+function cancelPrefix(queue: string): string {
+	return `${CANCEL_KEY_PREFIX}{${queue}}:`
+}
+
+/**
+ * Marks one delivery as cancelled, for the runtime that runs it to find.
+ *
+ * The mark holds the delivery it names, not just a flag, and it expires on its
+ * own, so a cancellation nobody collected leaves nothing behind.
+ */
+async function requestCancel(
+	client: () => Promise<RedisClient>,
+	queue: string,
+	delivery: RunningDelivery,
+): Promise<void> {
+	await (await client()).set(
+		`${cancelPrefix(queue)}${delivery.id}`,
+		String(delivery.attemptsStarted),
+		{ PX: CANCEL_MARK_TTL_MS },
+	)
+}
+
 function toWorkerOptions(request: ConsumeRequest, connection: ConnectionOptions): WorkerOptions {
 	const options: WorkerOptions = { connection, concurrency: request.concurrency }
 
@@ -312,7 +403,8 @@ async function reschedule(
 
 export function redisDriver(connection: ConnectionOptions): JobDriver {
 	const queues = new Map<string, Queue>()
-	const idempotency = redisIdempotency(connection)
+	const client = scriptClient(connection)
+	const idempotency = redisIdempotency(client)
 
 	function queueFor(name: string): Queue {
 		const open = queues.get(name)
@@ -326,6 +418,18 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 		queues.set(name, queue)
 
 		return queue
+	}
+
+	async function markRunningDelivery(queue: string, id: string): Promise<CancelResult> {
+		const job = await queueFor(queue).getJob(id)
+
+		if (!job) {
+			return { outcome: "unknown_job" }
+		}
+
+		await requestCancel(client, queue, { id, attemptsStarted: job.attemptsStarted })
+
+		return { outcome: "aborting" }
 	}
 
 	return {
@@ -343,6 +447,105 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			}
 
 			return { id: job.id }
+		},
+
+		async get(queue, id) {
+			const job = await queueFor(queue).getJob(id)
+
+			if (!job) {
+				return undefined
+			}
+
+			const state = await job.getState()
+
+			return {
+				id,
+				queue,
+				name: job.name,
+				state: JOB_STATES[state],
+				envelope: storedEnvelope(job.data),
+				attempts: job.attemptsMade,
+				maxAttempts: job.opts.attempts ?? 1,
+				failure: job.failedReason || undefined,
+			}
+		},
+
+		async retry(queue, id) {
+			const job = await queueFor(queue).getJob(id)
+
+			if (!job) {
+				return { outcome: "unknown_job" }
+			}
+
+			const state = await job.getState()
+
+			if (state !== "failed") {
+				return { outcome: "not_failed", state: JOB_STATES[state] }
+			}
+
+			await job.retry("failed", { resetAttemptsMade: true })
+
+			return { outcome: "retried" }
+		},
+
+		async cancel(queue, id) {
+			const job = await queueFor(queue).getJob(id)
+
+			if (!job) {
+				return { outcome: "unknown_job" }
+			}
+
+			const state = JOB_STATES[await job.getState()]
+
+			if (state === "completed" || state === "failed") {
+				return { outcome: "finished", state }
+			}
+
+			if (state === "active") {
+				await requestCancel(client, queue, { id, attemptsStarted: job.attemptsStarted })
+
+				return { outcome: "aborting" }
+			}
+
+			return job.remove({ removeChildren: true }).then(
+				() => ({ outcome: "removed" }) as const,
+				(refused: unknown) => {
+					if (!lockedByAWorker(refused)) {
+						throw refused
+					}
+
+					return markRunningDelivery(queue, id)
+				},
+			)
+		},
+
+		async takeCancelled(queue, running) {
+			if (running.length === 0) {
+				return []
+			}
+
+			const taken: unknown = await (await client()).runCommand(TAKE_CANCELLED_COMMAND, [
+				cancelPrefix(queue),
+				...running.flatMap((delivery) => [delivery.id, String(delivery.attemptsStarted)]),
+			])
+
+			if (!Array.isArray(taken)) {
+				return []
+			}
+
+			return taken.flatMap((position) => {
+				const delivery = running[Number(position) - 1]
+
+				return delivery ? [delivery] : []
+			})
+		},
+
+		async pause(queue) {
+			await queueFor(queue).pause()
+		},
+
+		async resume(queue) {
+			await queueFor(queue).resume()
 		},
 
 		async reconcileSchedules({ queue, declared }) {
@@ -420,6 +623,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 					return request
 						.run({
 							id: job.id,
+							attemptsStarted: job.attemptsStarted,
 							attempt: job.attemptsMade + 1,
 							maxAttempts: job.opts.attempts ?? 1,
 							envelope: job.data,

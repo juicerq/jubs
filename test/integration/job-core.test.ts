@@ -10,7 +10,7 @@ import {
 	type HandlerContext,
 	redisDriver,
 } from "@/index"
-import { scoped } from "./namespace"
+import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -91,7 +91,7 @@ describe("job-core over redis", () => {
 		})
 		expect(seen.context.signal.aborted).toBe(false)
 
-		const stored = await queue.getJob(enqueued.id)
+		const stored = await queue.getJob(storedId(enqueued))
 
 		expect(stored?.name).toBe(sendEmail.name)
 		expect(stored?.data).toEqual({
@@ -127,7 +127,7 @@ describe("job-core over redis", () => {
 
 		expect(await ran.promise).toEqual({ cents: 500 })
 
-		const stored = await queue.getJob(enqueued.id)
+		const stored = await queue.getJob(storedId(enqueued))
 
 		expect(stored?.data).toEqual({
 			v: 1,
@@ -160,7 +160,7 @@ describe("job-core over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 		const runtime = await jobs.start([defineHandler(kept, async () => {})])
 		const enqueued = await jobs.enqueue(retired, { to: "ada@example.com" })
-		const finished = await waitForFinished(queue, enqueued.id)
+		const finished = await waitForFinished(queue, storedId(enqueued))
 
 		expect(finished.attemptsMade).toBe(1)
 		expect(finished.failedReason).toContain(retired.name)

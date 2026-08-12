@@ -64,7 +64,7 @@ describe("hooks", () => {
 		expect(events[0]).toEqual({
 			name: "email.send",
 			queue: "mail",
-			id: "42",
+			id: "mail:42",
 			attempt: 2,
 			origin: "direct",
 		})

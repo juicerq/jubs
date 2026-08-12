@@ -15,6 +15,15 @@ export interface RecordedEnqueue {
 	readonly delivery: Delivery
 }
 
+/**
+ * A delivery a test hands to `deliver`, whose `attemptsStarted` is the attempt
+ * number unless the test names another one. This driver keeps no job, so it
+ * counts no deliveries: the two numbers only part when a delivery is handed out
+ * again without its attempt ending, which is a test's own to state.
+ */
+export type RecordedDelivery = Omit<JobDelivery, "attemptsStarted"> &
+	Partial<Pick<JobDelivery, "attemptsStarted">>
+
 export interface RecordedCompletion {
 	readonly key: string
 	readonly kept: KeptResult
@@ -29,7 +38,7 @@ export interface RecordingDriver extends JobDriver {
 	readonly renewed: string[]
 	readonly released: string[]
 	readonly completed: RecordedCompletion[]
-	deliver(queue: string, delivery: JobDelivery): Promise<unknown>
+	deliver(queue: string, delivery: RecordedDelivery): Promise<unknown>
 	refuseClose(): void
 	refuseSchedules(): void
 	keepResult(key: string, kept: KeptResult): void
@@ -60,6 +69,12 @@ export function recordingDriver(): RecordingDriver {
 	function unsupported(): Promise<never> {
 		return Promise.reject(
 			new Error("recordingDriver keeps no dead queue — test the dead queue against memoryDriver"),
+		)
+	}
+
+	function unstored(): Promise<never> {
+		return Promise.reject(
+			new Error("recordingDriver stores no job — test reading and retrying against memoryDriver"),
 		)
 	}
 
@@ -168,6 +183,16 @@ export function recordingDriver(): RecordingDriver {
 			return { id: String(delivered) }
 		},
 
+		get: unstored,
+		retry: unstored,
+		cancel: unstored,
+		pause: unstored,
+		resume: unstored,
+
+		async takeCancelled() {
+			return []
+		},
+
 		async consume(request) {
 			consumed.push(request)
 			consumers.set(request.queue, request.run)
@@ -192,7 +217,10 @@ export function recordingDriver(): RecordingDriver {
 				throw new Error(`no consumer is open on queue "${queue}"`)
 			}
 
-			const running = run(delivery)
+			const running = run({
+				...delivery,
+				attemptsStarted: delivery.attemptsStarted ?? delivery.attempt,
+			})
 
 			inFlight.add(running)
 

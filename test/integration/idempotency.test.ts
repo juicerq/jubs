@@ -7,7 +7,7 @@ import IORedis from "ioredis"
 import { IDEMPOTENCY_MAX_RESULT_BYTES } from "@/Idempotency"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
-import { scoped } from "./namespace"
+import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -127,12 +127,12 @@ describe("idempotency over redis", () => {
 		])
 
 		const first = await jobs.enqueue(chargeInvoice, { invoiceId: "inv-1" })
-		await waitFor(async () => !!(await queue.getJob(first.id))?.finishedOn)
+		await waitFor(async () => !!(await queue.getJob(storedId(first)))?.finishedOn)
 
 		const second = await jobs.enqueue(chargeInvoice, { invoiceId: "inv-1" })
-		await waitFor(async () => !!(await queue.getJob(second.id))?.finishedOn)
+		await waitFor(async () => !!(await queue.getJob(storedId(second)))?.finishedOn)
 
-		const kept = await queue.getJob(second.id)
+		const kept = await queue.getJob(storedId(second))
 
 		expect(ran).toEqual(["inv-1"])
 		expect(kept?.returnvalue).toEqual({ receipt: "receipt-inv-1" })
@@ -173,11 +173,13 @@ describe("idempotency over redis", () => {
 		await inspectorConnection.pexpire(leaseKey(syncLedger.name, "led-1"), 1_500)
 
 		const second = await jobs.enqueue(syncLedger, { ledgerId: "led-1", version: 2 })
-		const enqueued = await queue.getJob(second.id)
+		const enqueued = await queue.getJob(storedId(second))
 
-		await waitFor(async () => (await (await queue.getJob(second.id))?.getState()) === "delayed")
+		await waitFor(
+			async () => (await (await queue.getJob(storedId(second)))?.getState()) === "delayed",
+		)
 
-		const waiting = await queue.getJob(second.id)
+		const waiting = await queue.getJob(storedId(second))
 
 		expect(enqueued?.attemptsMade).toBe(0)
 		expect(waiting?.attemptsMade).toBe(0)
@@ -185,8 +187,10 @@ describe("idempotency over redis", () => {
 
 		holding.resolve()
 
-		await waitFor(async () => !!(await queue.getJob(first.id))?.finishedOn)
-		await waitFor(async () => (await (await queue.getJob(second.id))?.getState()) === "completed")
+		await waitFor(async () => !!(await queue.getJob(storedId(first)))?.finishedOn)
+		await waitFor(
+			async () => (await (await queue.getJob(storedId(second)))?.getState()) === "completed",
+		)
 
 		expect(ran).toEqual([1])
 
@@ -218,11 +222,13 @@ describe("idempotency over redis", () => {
 
 		const delivery = await jobs.enqueue(shipOrder, { orderId: "ord-1" })
 
-		await waitFor(async () => (await (await queue.getJob(delivery.id))?.getState()) === "delayed")
+		await waitFor(
+			async () => (await (await queue.getJob(storedId(delivery)))?.getState()) === "delayed",
+		)
 
 		expect(ran).toEqual([])
 
-		await waitFor(async () => !!(await queue.getJob(delivery.id))?.finishedOn)
+		await waitFor(async () => !!(await queue.getJob(storedId(delivery)))?.finishedOn)
 
 		expect(ran).toEqual(["ord-1"])
 
@@ -262,7 +268,7 @@ describe("idempotency over redis", () => {
 		await Bun.file(workerPath).delete()
 
 		await inspectorConnection.del(
-			`bull:${settlePayment.queue}:${delivery.id}:lock`,
+			`bull:${settlePayment.queue}:${storedId(delivery)}:lock`,
 			`bull:${settlePayment.queue}:stalled-check`,
 		)
 		await inspectorConnection.pexpire(leaseKey(settlePayment.name, "pay-1"), 1)
@@ -278,7 +284,7 @@ describe("idempotency over redis", () => {
 			async () =>
 				(await inspectorConnection.sismember(
 					`bull:${settlePayment.queue}:stalled`,
-					delivery.id,
+					storedId(delivery),
 				)) === 1,
 		)
 
@@ -286,7 +292,9 @@ describe("idempotency over redis", () => {
 
 		const sweeper = await jobs.start([settleOnce])
 
-		await waitFor(async () => (await (await queue.getJob(delivery.id))?.getState()) === "completed")
+		await waitFor(
+			async () => (await (await queue.getJob(storedId(delivery)))?.getState()) === "completed",
+		)
 		await Bun.sleep(500)
 
 		expect(await counter(startedKey)).toBe(2)
@@ -321,12 +329,12 @@ describe("idempotency over redis", () => {
 		])
 
 		const first = await jobs.enqueue(renderReport, { reportId: "rep-1" })
-		await waitFor(async () => !!(await queue.getJob(first.id))?.finishedOn)
+		await waitFor(async () => !!(await queue.getJob(storedId(first)))?.finishedOn)
 
 		const second = await jobs.enqueue(renderReport, { reportId: "rep-1" })
-		await waitFor(async () => !!(await queue.getJob(second.id))?.finishedOn)
+		await waitFor(async () => !!(await queue.getJob(storedId(second)))?.finishedOn)
 
-		const kept = await queue.getJob(second.id)
+		const kept = await queue.getJob(storedId(second))
 
 		expect(ran).toEqual(["rep-1"])
 		expect(kept?.returnvalue ?? undefined).toBeUndefined()

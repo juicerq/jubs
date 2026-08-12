@@ -103,8 +103,8 @@ describe("burying a dead job", () => {
 		const [dead] = await jobs.dead.list("billing")
 		const [mailed] = await jobs.dead.list("mail")
 
-		expect(dead?.id).toBe("billing:1")
-		expect(mailed?.id).toBe("mail:1")
+		expect(dead?.id).toBe("billing.dead:1")
+		expect(mailed?.id).toBe("mail.dead:1")
 	})
 })
 
@@ -153,7 +153,7 @@ describe("inspecting and replaying a dead job", () => {
 		const dead = await jobs.dead.list("billing")
 
 		expect(dead).toHaveLength(1)
-		expect(dead[0]?.id).toBe("billing:1")
+		expect(dead[0]?.id).toBe("billing.dead:1")
 		expect(dead[0]?.reason).toBe("attempts_exhausted")
 		expect(dead[0]?.envelope.data).toEqual({ cents: "500" })
 	})
@@ -191,7 +191,7 @@ describe("inspecting and replaying a dead job", () => {
 
 		expect(await jobs.dead.list("billing")).toEqual([])
 		expect(driver.enqueued(chargeCard)).toEqual([{ cents: "500" }, { cents: "500" }])
-		expect(replayed.id).toBe("2")
+		expect(replayed.id).toBe("billing:2")
 		expect(await driver.drain()).toBe(1)
 		expect(charged).toEqual([500, 500])
 	})
@@ -224,9 +224,22 @@ describe("inspecting and replaying a dead job", () => {
 	test("replay refuses an id no dead job answers to", async () => {
 		const jobs = createJobs({ driver: memoryDriver(), deadQueues: ["billing"] })
 
-		const failure = await jobs.dead.replay("billing:7").catch((error: unknown) => error)
+		const failure = await jobs.dead.replay("billing.dead:7").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("billing:7")
+		expect((failure as Error).message).toContain("billing.dead:7")
+		expect((failure as Error).message).toContain("replayed or discarded already")
+	})
+
+	test("replay and discard refuse an id that names a live queue", async () => {
+		const jobs = createJobs({ driver: memoryDriver(), deadQueues: ["billing"] })
+
+		const replayed = await jobs.dead.replay("billing:1").catch((error: unknown) => error)
+		const discarded = await jobs.dead.discard("billing:1").catch((error: unknown) => error)
+
+		for (const failure of [replayed, discarded]) {
+			expect((failure as Error).message).toContain("is not a dead job id")
+			expect((failure as Error).message).toContain("jobs.dead.list(queue)")
+		}
 	})
 
 	test("replay refuses a job whose definition the client does not know", async () => {
@@ -258,38 +271,8 @@ describe("inspecting and replaying a dead job", () => {
 
 		expect(await jobs.dead.list("billing")).toEqual([])
 
-		const failure = await jobs.dead.discard("billing:1").catch((error: unknown) => error)
+		const failure = await jobs.dead.discard("billing.dead:1").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("billing:1")
-	})
-
-	test("carries a dead job through list and discard when its queue name holds a colon", async () => {
-		const driver = memoryDriver()
-
-		const scoped = defineJob({
-			name: "billing.charge",
-			queue: "tenant:acme:billing",
-			payload: type({ cents: "string.numeric.parse" }),
-			delivery: { attempts: 1 },
-		})
-
-		const jobs = createJobs({ driver, deadQueues: [scoped.queue] })
-
-		await jobs.start([
-			defineHandler(scoped, async () => {
-				throw new Error("the card was declined")
-			}),
-		])
-
-		await jobs.enqueue(scoped, { cents: "500" })
-		await driver.drain().catch(() => {})
-
-		const [dead] = await jobs.dead.list(scoped.queue)
-
-		expect(dead?.id).toBe("tenant:acme:billing:1")
-
-		await jobs.dead.discard(dead?.id ?? "")
-
-		expect(await jobs.dead.list(scoped.queue)).toEqual([])
+		expect((failure as Error).message).toContain("billing.dead:1")
 	})
 })

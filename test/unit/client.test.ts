@@ -19,7 +19,7 @@ describe("enqueue", () => {
 			subject: "welcome",
 		})
 
-		expect(enqueued.id).toBe("1")
+		expect(enqueued.id).toBe("mail:1")
 		expect(driver.enqueued).toEqual([
 			{
 				queue: "mail",

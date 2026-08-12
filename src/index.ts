@@ -1,3 +1,4 @@
+export { CancelledError, type RunningDelivery } from "@/Cancellation"
 export { createJobs, type JobsClient, type JobsConfig } from "@/Client"
 export type { DeadEntry, DeadJob, DeadReason } from "@/Dead"
 export {
@@ -11,6 +12,7 @@ export {
 } from "@/Definition"
 export { DELIVERY_DEFAULTS, type Delivery, type DeliveryPolicy } from "@/Delivery"
 export type {
+	CancelResult,
 	ConsumeRequest,
 	Consumer,
 	DeadStore,
@@ -18,8 +20,11 @@ export type {
 	EnqueueRequest,
 	JobDelivery,
 	JobDriver,
+	JobSnapshot,
+	JobState,
 	QueueLimiter,
 	ReconcileRequest,
+	RetryResult,
 	ScheduleUpsert,
 } from "@/Driver"
 export type { Envelope, TraceContext } from "@/Envelope"

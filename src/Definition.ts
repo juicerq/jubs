@@ -8,14 +8,20 @@ export const DEFAULT_PAYLOAD_VERSION = 1
 export type Origin = "direct" | "schedule" | "flow" | "relay"
 
 export interface HandlerContext {
+	/**
+	 * The id of this job, in the one form the whole API speaks: the same string
+	 * `jobs.enqueue` gave the producer, and the one `jobs.get`, `jobs.retry` and
+	 * `jobs.cancel` take.
+	 */
 	readonly id: string
 	readonly attempt: number
 	readonly maxAttempts: number
 	readonly origin: Origin
 	/**
-	 * Aborts when the job's `timeoutMs` expires, and when `close({ timeoutMs })`
-	 * runs out of patience during a shutdown. `signal.reason` tells the two
-	 * apart: a shutdown aborts with a `ShutdownAbortError`.
+	 * Aborts when the job's `timeoutMs` expires, when `jobs.cancel(id)` reaches
+	 * this job, and when `close({ timeoutMs })` runs out of patience during a
+	 * shutdown. `signal.reason` tells the three apart: a shutdown aborts with a
+	 * `ShutdownAbortError`, and a cancellation with a `CancelledError`.
 	 *
 	 * Pass it to whatever waits — `fetch`, a database client, another
 	 * `AbortSignal`-aware library — and **throw** once it aborts. A handler that
@@ -29,10 +35,19 @@ export interface HandlerContext {
 export interface JobDefinition<
 	Payload extends StandardSchemaV1 = StandardSchemaV1,
 	Queue extends string = string,
+	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
 > {
 	readonly name: string
 	readonly queue: Queue
 	readonly payload: Payload
+	/**
+	 * The schema of what the handler resolves. The handler returns this schema's
+	 * input, and what the schema gives back is what the handler's return value
+	 * becomes. A repeated delivery under an `idempotencyKey` replays that value
+	 * as JSON, so a `Date` comes back a string. A definition that declares no
+	 * `result` validates nothing, and its handler returns `unknown`.
+	 */
+	readonly result?: Result
 	readonly version?: number
 	readonly migrations?: Readonly<Record<number, PayloadMigration>>
 	readonly delivery?: DeliveryPolicy
@@ -41,8 +56,11 @@ export interface JobDefinition<
 	readonly timeoutMs?: number
 }
 
-export interface JobDefinitionInput<Payload extends StandardSchemaV1, Queue extends string = string>
-	extends Omit<JobDefinition<Payload, Queue>, "delivery" | "schedule" | "idempotencyKey"> {
+export interface JobDefinitionInput<
+	Payload extends StandardSchemaV1,
+	Queue extends string = string,
+	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+> extends Omit<JobDefinition<Payload, Queue, Result>, "delivery" | "schedule" | "idempotencyKey"> {
 	readonly delivery?: DeliveryPolicy<StandardSchemaV1.InferOutput<Payload>>
 	readonly schedule?: Schedule<StandardSchemaV1.InferInput<Payload>>
 	readonly idempotencyKey?: (data: StandardSchemaV1.InferOutput<Payload>) => string
@@ -57,10 +75,13 @@ export interface JobHandler<Queue extends string = string> {
 	readonly run: (data: unknown, context: HandlerContext) => Promise<unknown>
 }
 
-export type HandlerRun<Payload extends StandardSchemaV1> = (
+export type HandlerRun<
+	Payload extends StandardSchemaV1,
+	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+> = (
 	data: StandardSchemaV1.InferOutput<Payload>,
 	context: HandlerContext,
-) => Promise<unknown>
+) => Promise<Result extends StandardSchemaV1 ? StandardSchemaV1.InferInput<Result> : unknown>
 
 function strayMigration(name: string, from: string, version: number): Error {
 	if (version <= DEFAULT_PAYLOAD_VERSION) {
@@ -114,14 +135,17 @@ function assertTimeout(definition: Pick<JobDefinition, "name" | "timeoutMs">): v
 	)
 }
 
-export function defineJob<Payload extends StandardSchemaV1, const Queue extends string = string>(
-	input: JobDefinitionInput<Payload, Queue>,
-): JobDefinition<Payload, Queue> {
+export function defineJob<
+	Payload extends StandardSchemaV1,
+	const Queue extends string = string,
+	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+>(input: JobDefinitionInput<Payload, Queue, Result>): JobDefinition<Payload, Queue, Result> {
 	assertVersioning(input)
 	assertTimeout(input)
 
 	const named = { name: input.name, queue: input.queue, payload: input.payload }
-	const versioned = input.version ? { ...named, version: input.version } : named
+	const resulting = input.result ? { ...named, result: input.result } : named
+	const versioned = input.version ? { ...resulting, version: input.version } : resulting
 	const migrating = input.migrations ? { ...versioned, migrations: input.migrations } : versioned
 	const scheduled = input.schedule ? { ...migrating, schedule: input.schedule } : migrating
 	const timed = input.timeoutMs ? { ...scheduled, timeoutMs: input.timeoutMs } : scheduled
@@ -137,9 +161,13 @@ export function defineJob<Payload extends StandardSchemaV1, const Queue extends 
 	return { ...definition, delivery: input.delivery as DeliveryPolicy }
 }
 
-export function defineHandler<Payload extends StandardSchemaV1, Queue extends string = string>(
-	definition: JobDefinition<Payload, Queue>,
-	run: HandlerRun<Payload>,
+export function defineHandler<
+	Payload extends StandardSchemaV1,
+	Queue extends string = string,
+	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+>(
+	definition: JobDefinition<Payload, Queue, Result>,
+	run: HandlerRun<Payload, Result>,
 ): JobHandler<Queue> {
 	return { definition, run: run as JobHandler["run"] }
 }

@@ -3,7 +3,7 @@ import { type } from "arktype"
 import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
-import { scoped } from "./namespace"
+import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -79,7 +79,7 @@ describe("dead queue over redis", () => {
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
 
-		await waitForFinished(live, enqueued.id)
+		await waitForFinished(live, storedId(enqueued))
 
 		const waiting = await dead.getWaiting()
 
@@ -127,7 +127,7 @@ describe("dead queue over redis", () => {
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
 
-		await waitForFinished(live, enqueued.id)
+		await waitForFinished(live, storedId(enqueued))
 
 		const dead = await jobs.dead.list(chargeCard.queue)
 
@@ -180,7 +180,7 @@ describe("dead queue over redis", () => {
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
 
-		await waitForFinished(live, enqueued.id)
+		await waitForFinished(live, storedId(enqueued))
 
 		const [dead] = await jobs.dead.list(chargeCard.queue)
 
@@ -212,7 +212,7 @@ describe("dead queue over redis", () => {
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
 
-		await waitForFinished(live, enqueued.id)
+		await waitForFinished(live, storedId(enqueued))
 
 		const [buried] = await jobs.dead.list(chargeCard.queue)
 		const id = buried?.id ?? ""

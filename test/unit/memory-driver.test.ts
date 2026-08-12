@@ -61,7 +61,9 @@ describe("memoryDriver", () => {
 		await jobs.enqueue(chargeCard, { cents: "1" })
 		await driver.runNext()
 
-		expect(contexts).toEqual([{ id: "1", attempt: 1, maxAttempts: DELIVERY_DEFAULTS.attempts }])
+		expect(contexts).toEqual([
+			{ id: "billing:1", attempt: 1, maxAttempts: DELIVERY_DEFAULTS.attempts },
+		])
 	})
 
 	test("rejects an invalid payload before it reaches the driver", async () => {

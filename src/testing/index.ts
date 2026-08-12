@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto"
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import type { RunningDelivery } from "@/Cancellation"
 import type { DeadEntry } from "@/Dead"
 import type { JobDefinition } from "@/Definition"
-import type { ConsumeRequest, JobDriver } from "@/Driver"
+import type { ConsumeRequest, JobDriver, JobState } from "@/Driver"
 import type { Envelope } from "@/Envelope"
 import { type IdempotencyStore, type KeptResult, LeaseHeldError } from "@/Idempotency"
+import { composeJobId } from "@/JobId"
 
 const ACCEPTED_DELIVERY = [
 	"attempts",
@@ -25,6 +27,25 @@ interface MemoryJob {
 	readonly queue: string
 	readonly maxAttempts: number
 	readonly envelope: Envelope
+	state: JobState
+	attempts: number
+	attemptsStarted: number
+	failure: string | undefined
+}
+
+/**
+ * What a store over Redis would give back, since it writes the kept result as
+ * JSON and reads it back the same way. A result the runtime keeps is always
+ * serialisable, because `keptResultOf` checks it first; a caller reaching the
+ * store on its own is given back what it passed, so its own mistake is not
+ * turned into a throw from a driver.
+ */
+function asJsonKeeps(kept: KeptResult): KeptResult {
+	try {
+		return JSON.parse(JSON.stringify(kept)) as KeptResult
+	} catch {
+		return kept
+	}
 }
 
 interface MemoryDeadQueue {
@@ -70,10 +91,43 @@ export interface MemoryDriver extends JobDriver {
  *
  * The idempotency store keeps the absent and the complete state for real, so a
  * repeated delivery of a completed key skips the handler and gives back the kept
- * result. It keeps no clock, so `leaseMs` and the result retention are ignored
+ * result — as the JSON projection of it, the way a store over Redis gives it
+ * back, so a `Date` a result schema produced comes back a string here too. It
+ * keeps no clock, so `leaseMs` and the result retention are ignored
  * and a lease never expires on its own. A delivery that meets a held lease has
  * to be rescheduled, which needs a clock, so it throws instead: test a held
  * lease, an expired lease and a killed worker against `redisDriver`.
+ *
+ * It keeps every job it records, so `jobs.get` and `jobs.retry` answer for real.
+ * A job it keeps is `waiting`, `active`, `completed` or `failed` — the four states
+ * an inline run passes through — and never `delayed`, `waiting_children` or
+ * `unknown`, which need a clock or a queue this driver does not have. Its
+ * `attempts` counts the runs that ended here, so a job reads 0 before its first
+ * run and 1 after it, and climbs only when `runNext` or `drain` runs it again —
+ * a failed job is never retried on its own. `jobs.retry` puts a failed job back
+ * in the pending line, clears its failure and puts its count back to 0, the way
+ * a retry over Redis does; a job in any other state is refused with the state it
+ * is in, and an id no job answers to comes back as `unknown_job`.
+ *
+ * `jobs.cancel` answers with what this driver knows. A job it has not run is
+ * removed and stops answering to `jobs.get`; a job that already finished comes
+ * back with the state it settled in; an id no job answers to comes back as
+ * `unknown_job`. A job it is running right now is marked and comes back as
+ * `aborting`, and that abort is real: the marks are a map in memory, from job to
+ * the delivery cancelled, and the sweep that reads them belongs to the runtime,
+ * not to a driver. A mark is handed out only to the delivery it names, so one
+ * left behind by a delivery that ended kills no later delivery — the same rule
+ * `redisDriver` follows. The marks keep no clock, so `CANCEL_MARK_TTL_MS` is
+ * ignored and a mark nobody collects never expires on its own — test the expiry
+ * against `redisDriver`. Nor is there a
+ * race between reading a job's state and removing it, because a job runs inline
+ * on the caller's stack: test a job that turns active under a cancellation
+ * against `redisDriver`.
+ *
+ * `jobs.pause` and `jobs.resume` are simulated where this driver consumes: a
+ * paused queue holds its pending jobs back, so `runNext` skips them and fails
+ * when every pending job sits on a paused queue, and `drain` runs the other
+ * queues and counts only what it ran.
  *
  * `context.signal` and `timeoutMs` are enforced by the runtime, not by a driver,
  * so both work here: a handler that outruns its `timeoutMs` has its signal
@@ -93,9 +147,11 @@ export function memoryDriver(): MemoryDriver {
 	const recorded: MemoryJob[] = []
 	const pending: MemoryJob[] = []
 	const consumers = new Map<string, ConsumeRequest["run"]>()
+	const paused = new Set<string>()
 	const buried = new Map<string, MemoryDeadQueue>()
 	const leased = new Map<string, string>()
 	const kept = new Map<string, KeptResult>()
+	const marked = new Map<string, number>()
 
 	function deadQueueFor(queue: string): MemoryDeadQueue {
 		const open = buried.get(queue)
@@ -111,10 +167,24 @@ export function memoryDriver(): MemoryDriver {
 		return opened
 	}
 
+	function jobAt(queue: string, id: string): MemoryJob | undefined {
+		return recorded.find((candidate) => candidate.queue === queue && candidate.id === id)
+	}
+
+	function runnable(): MemoryJob | undefined {
+		return pending.find((job) => !paused.has(job.queue))
+	}
+
 	async function runNext(): Promise<void> {
-		const next = pending[0]
+		const next = runnable()
 
 		if (!next) {
+			if (pending.length > 0) {
+				throw new Error(
+					"juibs: memoryDriver has every pending job on a paused queue — call jobs.resume(queue) to run them",
+				)
+			}
+
 			throw new Error("juibs: memoryDriver has no pending job to run")
 		}
 
@@ -126,20 +196,35 @@ export function memoryDriver(): MemoryDriver {
 			)
 		}
 
-		pending.shift()
+		pending.splice(pending.indexOf(next), 1)
+		next.state = "active"
+		next.attemptsStarted += 1
 
 		await run({
 			id: next.id,
-			attempt: 1,
+			attempt: next.attempts + 1,
+			attemptsStarted: next.attemptsStarted,
 			maxAttempts: next.maxAttempts,
 			envelope: next.envelope,
-		}).catch((error: unknown) => {
-			if (error instanceof LeaseHeldError) {
-				throw unsupported("rescheduling a delivery whose idempotency lease is held")
-			}
-
-			throw error
 		})
+			.then(() => {
+				next.state = "completed"
+				next.attempts += 1
+			})
+			.catch((error: unknown) => {
+				if (error instanceof LeaseHeldError) {
+					next.state = "waiting"
+					pending.unshift(next)
+
+					throw unsupported("rescheduling a delivery whose idempotency lease is held")
+				}
+
+				next.state = "failed"
+				next.attempts += 1
+				next.failure = error instanceof Error ? error.message : String(error)
+
+				throw error
+			})
 	}
 
 	const idempotency: IdempotencyStore = {
@@ -171,7 +256,7 @@ export function memoryDriver(): MemoryDriver {
 			}
 
 			leased.delete(key)
-			kept.set(key, result)
+			kept.set(key, asJsonKeeps(result))
 		},
 
 		async release({ key, token }) {
@@ -181,6 +266,22 @@ export function memoryDriver(): MemoryDriver {
 
 			leased.delete(key)
 		},
+	}
+
+	function requestCancel(queue: string, delivery: RunningDelivery): void {
+		marked.set(composeJobId(queue, delivery.id), delivery.attemptsStarted)
+	}
+
+	function takeCancellation(queue: string, delivery: RunningDelivery): boolean {
+		const key = composeJobId(queue, delivery.id)
+
+		if (marked.get(key) !== delivery.attemptsStarted) {
+			return false
+		}
+
+		marked.delete(key)
+
+		return true
 	}
 
 	return {
@@ -198,12 +299,89 @@ export function memoryDriver(): MemoryDriver {
 				queue: request.queue,
 				maxAttempts: request.delivery.attempts,
 				envelope: JSON.parse(JSON.stringify(request.envelope)) as Envelope,
+				state: "waiting",
+				attempts: 0,
+				attemptsStarted: 0,
+				failure: undefined,
 			}
 
 			recorded.push(job)
 			pending.push(job)
 
 			return { id: job.id }
+		},
+
+		async get(queue, id) {
+			const job = jobAt(queue, id)
+
+			if (!job) {
+				return undefined
+			}
+
+			return {
+				id: job.id,
+				queue: job.queue,
+				name: job.envelope.name,
+				state: job.state,
+				envelope: job.envelope,
+				attempts: job.attempts,
+				maxAttempts: job.maxAttempts,
+				failure: job.failure,
+			}
+		},
+
+		async retry(queue, id) {
+			const job = jobAt(queue, id)
+
+			if (!job) {
+				return { outcome: "unknown_job" }
+			}
+
+			if (job.state !== "failed") {
+				return { outcome: "not_failed", state: job.state }
+			}
+
+			job.state = "waiting"
+			job.attempts = 0
+			job.failure = undefined
+			pending.push(job)
+
+			return { outcome: "retried" }
+		},
+
+		async cancel(queue, id) {
+			const job = jobAt(queue, id)
+
+			if (!job) {
+				return { outcome: "unknown_job" }
+			}
+
+			if (job.state === "completed" || job.state === "failed") {
+				return { outcome: "finished", state: job.state }
+			}
+
+			if (job.state === "active") {
+				requestCancel(queue, job)
+
+				return { outcome: "aborting" }
+			}
+
+			pending.splice(pending.indexOf(job), 1)
+			recorded.splice(recorded.indexOf(job), 1)
+
+			return { outcome: "removed" }
+		},
+
+		async takeCancelled(queue, running) {
+			return running.filter((delivery) => takeCancellation(queue, delivery))
+		},
+
+		async pause(queue) {
+			paused.add(queue)
+		},
+
+		async resume(queue) {
+			paused.delete(queue)
 		},
 
 		async consume(request) {
@@ -266,7 +444,7 @@ export function memoryDriver(): MemoryDriver {
 		async drain() {
 			let ran = 0
 
-			while (pending.length > 0) {
+			while (runnable()) {
 				await runNext()
 				ran += 1
 			}

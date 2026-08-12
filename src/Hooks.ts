@@ -4,6 +4,11 @@ import type { SerializedError } from "@/Failure"
 export interface JobEvent {
 	readonly name: string
 	readonly queue: string
+	/**
+	 * The id of the job the event is about, in the one form the whole API speaks:
+	 * the same string `jobs.enqueue` gave the producer, and the one `jobs.get`,
+	 * `jobs.retry` and `jobs.cancel` take.
+	 */
 	readonly id: string
 	readonly attempt: number
 	readonly origin: Origin

@@ -1,9 +1,10 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { type DeadJob, deadJobId, readDeadJobId } from "@/Dead"
+import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
 import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
-import type { EnqueuedJob, JobDriver } from "@/Driver"
+import type { CancelResult, EnqueuedJob, JobDriver, JobSnapshot, RetryResult } from "@/Driver"
 import type { JobHooks } from "@/Hooks"
+import { composeJobId, readJobId } from "@/JobId"
 import { migrateEnvelope } from "@/Migration"
 import { validatePayload } from "@/Payload"
 import { type JobsRuntime, type StartOptions, startRuntime } from "@/Runtime"
@@ -26,11 +27,84 @@ export interface JobsClient {
 		handlers: JobHandler<Queue>[],
 		options?: StartOptions<Queue>,
 	): Promise<JobsRuntime>
+	/**
+	 * Describes the job an id names, and gives back `undefined` when no job answers
+	 * to it — a job Redis has already dropped, one that never existed, or an id
+	 * that names a dead queue, which `jobs.dead.list(queue)` reads instead.
+	 */
+	get(id: string): Promise<JobSnapshot | undefined>
+	/**
+	 * Runs a failed job again, from attempt 1. The result says whether it was
+	 * retried, whether no job answers to the id, or which state holds a job that
+	 * is not failed.
+	 *
+	 * An id naming a dead queue reads `unknown_job`: a dead job is replayed with
+	 * `jobs.dead.replay(id)`, which rebuilds it from its envelope.
+	 */
+	retry(id: string): Promise<RetryResult>
+	/**
+	 * Stops a job. A job that has not started is removed, together with the
+	 * children it waits on; a job already running
+	 * has its handler's signal aborted — by whichever process runs it, not by the
+	 * one that asks — and then dies without another attempt, with the failure
+	 * hooks and a dead queue entry whose reason is `cancelled`.
+	 *
+	 * Two limits come from the signal itself, the same two a shutdown has. A
+	 * handler that ignores its signal runs to the end, because nothing can stop a
+	 * running function. A handler that notices the abort and *returns* counts as a
+	 * success, because the contract is to throw: rethrow `context.signal.reason`.
+	 *
+	 * An id naming a dead queue reads `unknown_job` and leaves the dead entry
+	 * where it is: a dead job runs nothing, so there is nothing to stop, and
+	 * `jobs.dead.discard(id)` is what drops the record.
+	 */
+	cancel(id: string): Promise<CancelResult>
+	pause(queue: string): Promise<void>
+	resume(queue: string): Promise<void>
 	readonly dead: {
 		list(queue: string): Promise<DeadJob[]>
 		replay(id: string): Promise<EnqueuedJob>
 		discard(id: string): Promise<void>
 	}
+}
+
+/**
+ * Reads the live queue and the stored id out of an id `jobs.dead.list(queue)`
+ * composed. A dead job is named after the dead queue that keeps it, and the
+ * `DeadStore` is asked in the name of the live queue, so the suffix comes off
+ * here — and an id that carries no dead queue is the caller's mistake.
+ */
+function readDeadJobId(id: string): { queue: string; storedId: string } {
+	const { queue, storedId } = readJobId(id)
+	const live = liveQueueName(queue)
+
+	if (live === undefined) {
+		throw new Error(
+			`juibs: "${id}" is not a dead job id — pass an id returned by jobs.dead.list(queue)`,
+		)
+	}
+
+	return { queue: live, storedId }
+}
+
+/**
+ * Reads the queue and the stored id out of an id that must name a live job, and
+ * gives back `undefined` when the id names a dead queue instead.
+ *
+ * A dead job is not a job: it is a record of one. `get`, `retry` and `cancel`
+ * speak of the live queues only, and a dead id is an absence to them, not a
+ * mistake — `jobs.dead.replay(id)` and `jobs.dead.discard(id)` are what read it.
+ * Answering a dead id here would be worse than useless: `cancel` would call
+ * `remove` on the dead record and destroy it.
+ */
+function readLiveJobId(id: string): { queue: string; storedId: string } | undefined {
+	const { queue, storedId } = readJobId(id)
+
+	if (liveQueueName(queue) !== undefined) {
+		return undefined
+	}
+
+	return { queue, storedId }
 }
 
 function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
@@ -64,7 +138,10 @@ export function createJobs(config: JobsConfig): JobsClient {
 			async list(queue) {
 				const buried = await config.driver.dead.list(queue)
 
-				return buried.map((job) => ({ ...job.entry, id: deadJobId(queue, job.id) }))
+				return buried.map((job) => ({
+					...job.entry,
+					id: composeJobId(deadQueueName(queue), job.id),
+				}))
 			},
 
 			async replay(id) {
@@ -98,7 +175,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 				await config.driver.dead.remove(queue, storedId)
 
-				return enqueued
+				return { id: composeJobId(definition.queue, enqueued.id) }
 			},
 
 			async discard(id) {
@@ -116,15 +193,61 @@ export function createJobs(config: JobsConfig): JobsClient {
 		async enqueue(definition, data) {
 			const validated = await validatePayload(definition, data)
 
-			return config.driver.enqueue({
+			const enqueued = await config.driver.enqueue({
 				queue: definition.queue,
 				envelope: { v: payloadVersion(definition), name: definition.name, data, origin: "direct" },
 				delivery: resolveDelivery(definition, validated),
 			})
+
+			return { id: composeJobId(definition.queue, enqueued.id) }
 		},
 
 		start(handlers, options) {
 			return startRuntime(config, handlers, options)
+		},
+
+		async get(id) {
+			const live = readLiveJobId(id)
+
+			if (!live) {
+				return undefined
+			}
+
+			const snapshot = await config.driver.get(live.queue, live.storedId)
+
+			if (!snapshot) {
+				return undefined
+			}
+
+			return { ...snapshot, id: composeJobId(live.queue, snapshot.id) }
+		},
+
+		async retry(id) {
+			const live = readLiveJobId(id)
+
+			if (!live) {
+				return { outcome: "unknown_job" }
+			}
+
+			return config.driver.retry(live.queue, live.storedId)
+		},
+
+		async cancel(id) {
+			const live = readLiveJobId(id)
+
+			if (!live) {
+				return { outcome: "unknown_job" }
+			}
+
+			return config.driver.cancel(live.queue, live.storedId)
+		},
+
+		pause(queue) {
+			return config.driver.pause(queue)
+		},
+
+		resume(queue) {
+			return config.driver.resume(queue)
 		},
 	}
 }
