@@ -17,7 +17,7 @@ export interface Envelope {
 
 export class EnvelopeError extends Error {
 	constructor(reason: string) {
-		super(`juibs: the stored job is not a juibs envelope — ${reason}`)
+		super(`jubs: the stored job is not a jubs envelope — ${reason}`)
 		this.name = "EnvelopeError"
 	}
 }

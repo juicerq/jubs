@@ -16,7 +16,7 @@ export function readJobId(id: string): { queue: string; storedId: string } {
 
 	if (cut < 1 || cut === id.length - 1) {
 		throw new Error(
-			`juibs: "${id}" is not a job id — pass an id returned by jobs.enqueue or by jobs.dead.list(queue)`,
+			`jubs: "${id}" is not a job id — pass an id returned by jobs.enqueue or by jobs.dead.list(queue)`,
 		)
 	}
 

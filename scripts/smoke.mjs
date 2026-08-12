@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 const entries = {
 	".": ["createJobs", "defineJob", "defineHandler", "redisDriver"],
 	"./testing": ["memoryDriver"],
-	"./dashboard": ["JuibsDashboard"],
+	"./dashboard": ["JubsDashboard"],
 }
 const subpaths = Object.keys(entries)
 const root = fileURLToPath(new URL("..", import.meta.url))
@@ -43,7 +43,7 @@ const check = `
 const seen = new Map()
 
 for (const [subpath, expected] of Object.entries(${JSON.stringify(entries)})) {
-	const specifier = \`@juicerq/juibs\${subpath.slice(1)}\`
+	const specifier = \`@juicerq/jubs\${subpath.slice(1)}\`
 	const namespace = await import(specifier)
 	const missing = expected.filter((name) => namespace[name] === undefined)
 
@@ -66,7 +66,7 @@ if (seen.size !== ${subpaths.length}) {
 }
 `
 
-const workspace = mkdtempSync(join(tmpdir(), "juibs-smoke-"))
+const workspace = mkdtempSync(join(tmpdir(), "jubs-smoke-"))
 const packed = join(workspace, "packed")
 
 console.log(`smoke: ${runtime}`)
@@ -77,7 +77,7 @@ try {
 
 	writeFileSync(
 		join(workspace, "package.json"),
-		`${JSON.stringify({ name: "juibs-smoke", private: true, type: "module" }, null, 2)}\n`,
+		`${JSON.stringify({ name: "jubs-smoke", private: true, type: "module" }, null, 2)}\n`,
 	)
 	writeFileSync(join(workspace, "check.mjs"), check)
 

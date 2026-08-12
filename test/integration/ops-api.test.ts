@@ -106,7 +106,7 @@ await jobs.start([
 ])
 `
 
-	const path = join(tmpdir(), `juibs-cancel-worker-${Bun.randomUUIDv7()}.mjs`)
+	const path = join(tmpdir(), `jubs-cancel-worker-${Bun.randomUUIDv7()}.mjs`)
 
 	await Bun.write(path, source)
 
@@ -143,7 +143,7 @@ describe("reading a job over redis", () => {
 	test("describes a job waiting on a queue nobody consumes", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-waiting"),
+			queue: scoped("jubs.test.ops-waiting"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 
@@ -172,7 +172,7 @@ describe("reading a job over redis", () => {
 	test("carries the failure and the attempt of a job that failed every attempt", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-failed"),
+			queue: scoped("jubs.test.ops-failed"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: { attempts: 2, backoff: { type: "exponential", delayMs: 10 } },
 		})
@@ -204,7 +204,7 @@ describe("reading a job over redis", () => {
 	test("reads a dead job's id on the dead queue, not on the live one", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-dead-id"),
+			queue: scoped("jubs.test.ops-dead-id"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: { attempts: 1 },
 		})
@@ -253,7 +253,7 @@ describe("reading a job over redis", () => {
 	test("answers the id a scheduled job's handler is given, colons and all", async () => {
 		const sendDigest = defineJob({
 			name: scoped("reports.digest"),
-			queue: scoped("juibs.test.ops-schedule-id"),
+			queue: scoped("jubs.test.ops-schedule-id"),
 			payload: type({ ledger: "string" }),
 			schedule: every("1 second", { data: { ledger: "main" } }),
 		})
@@ -280,7 +280,7 @@ describe("reading a job over redis", () => {
 	})
 
 	test("gives back nothing for an id redis keeps no job under", async () => {
-		const missing = inspect(scoped("juibs.test.ops-missing"))
+		const missing = inspect(scoped("jubs.test.ops-missing"))
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 
 		expect(await jobs.get(`${missing.name}:404`)).toBeUndefined()
@@ -291,7 +291,7 @@ describe("retrying a job over redis", () => {
 	test("runs a job that failed every attempt again, from attempt 1", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-retry"),
+			queue: scoped("jubs.test.ops-retry"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: { attempts: 1 },
 		})
@@ -333,7 +333,7 @@ describe("retrying a job over redis", () => {
 	test("names the state of a job that is not failed, and the id no job answers to", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-not-failed"),
+			queue: scoped("jubs.test.ops-not-failed"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 
@@ -351,7 +351,7 @@ describe("cancelling a job over redis", () => {
 	test("removes a job no worker has taken yet", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-cancel-waiting"),
+			queue: scoped("jubs.test.ops-cancel-waiting"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 
@@ -367,7 +367,7 @@ describe("cancelling a job over redis", () => {
 	test("names the state of a job that already finished, and the id no job answers to", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-cancel-finished"),
+			queue: scoped("jubs.test.ops-cancel-finished"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 
@@ -388,7 +388,7 @@ describe("cancelling a job over redis", () => {
 	test("a cancelled job dies without another attempt, and lands in the dead queue", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-cancel-dead"),
+			queue: scoped("jubs.test.ops-cancel-dead"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 10 } },
 		})
@@ -441,7 +441,7 @@ describe("cancelling a job over redis", () => {
 	test("leaves no mark behind, so a retry of the cancelled job runs to the end", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-cancel-retry"),
+			queue: scoped("jubs.test.ops-cancel-retry"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: { attempts: 1 },
 		})
@@ -489,7 +489,7 @@ describe("cancelling a job over redis", () => {
 	test("lets a cancellation nobody collected die with its delivery, never killing the next one", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-cancel-stale"),
+			queue: scoped("jubs.test.ops-cancel-stale"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: { attempts: 1 },
 		})
@@ -541,13 +541,13 @@ describe("cancelling a job over redis", () => {
 	test("a cancellation asked for by another process aborts the handler that runs the job", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),
-			queue: scoped("juibs.test.ops-cancel-cross"),
+			queue: scoped("jubs.test.ops-cancel-cross"),
 			payload: type({ reportId: "string" }),
 			delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 10 } },
 		})
 
-		const startedKey = scoped("juibs:test:ops:cancel:started")
-		const abortedKey = scoped("juibs:test:ops:cancel:aborted")
+		const startedKey = scoped("jubs:test:ops:cancel:started")
+		const abortedKey = scoped("jubs:test:ops:cancel:aborted")
 
 		await scrub(inspect(renderReport.queue))
 		await scrub(inspect(`${renderReport.queue}.dead`))
@@ -585,7 +585,7 @@ describe("pausing a queue over redis", () => {
 	test("stops a running worker from taking jobs until the queue resumes", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.ops-pause"),
+			queue: scoped("jubs.test.ops-pause"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 

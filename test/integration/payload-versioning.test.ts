@@ -12,7 +12,7 @@ const inspectorConnection = new IORedis(REDIS_URL)
 
 const opened: Queue[] = []
 
-const QUEUE = scoped("juibs.test.version-ahead")
+const QUEUE = scoped("jubs.test.version-ahead")
 
 const JOB_NAME = scoped("contact.sync")
 

@@ -37,7 +37,7 @@ describe("runtime-guardrails over redis", () => {
 	test("reports every failed attempt, and reports the job dead once", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.hooks"),
+			queue: scoped("jubs.test.hooks"),
 			payload: type({ cents: "number" }),
 			delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 10 } },
 		})
@@ -94,7 +94,7 @@ describe("runtime-guardrails over redis", () => {
 	test("holds a job with delayMs until its delay has passed", async () => {
 		const sendEmail = defineJob({
 			name: scoped("email.send"),
-			queue: scoped("juibs.test.delay"),
+			queue: scoped("jubs.test.delay"),
 			payload: type({ to: "string.email" }),
 			delivery: { delayMs: 700 },
 		})

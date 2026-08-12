@@ -15,7 +15,7 @@ export class PayloadError extends Error {
 	constructor(jobName: string, issues: readonly StandardSchemaV1.Issue[]) {
 		const reasons = issues.map((issue) => `${readPath(issue)}: ${issue.message}`).join("; ")
 
-		super(`juibs: the payload for job "${jobName}" is invalid — ${reasons}`)
+		super(`jubs: the payload for job "${jobName}" is invalid — ${reasons}`)
 		this.name = "PayloadError"
 	}
 }
