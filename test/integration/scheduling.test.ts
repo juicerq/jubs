@@ -53,7 +53,7 @@ describe("scheduling over redis", () => {
 	test("start writes the declared scheduler, and a later start without it takes it away", async () => {
 		const closeBooks = defineJob({
 			name: scoped("billing.close"),
-			queue: scoped("juibs.test.schedule.reconcile"),
+			queue: scoped("jubs.test.schedule.reconcile"),
 			payload: type({ ledger: "string" }),
 			schedule: dailyAt("09:30", { data: { ledger: "main" }, timezone: "America/Sao_Paulo" }),
 		})
@@ -76,7 +76,7 @@ describe("scheduling over redis", () => {
 			defineHandler(sendEmail, async () => {}),
 		])
 
-		const schedulerKey = `juibs.${closeBooks.name}`
+		const schedulerKey = `jubs.${closeBooks.name}`
 		const written = await queue.getJobSchedulers()
 		const ours = written.find((scheduler) => scheduler.key === schedulerKey)
 
@@ -113,7 +113,7 @@ describe("scheduling over redis", () => {
 	test("a start that registers no definition keeps the scheduler of the handler it runs", async () => {
 		const rotateKeys = defineJob({
 			name: scoped("security.rotate"),
-			queue: scoped("juibs.test.schedule.handlers"),
+			queue: scoped("jubs.test.schedule.handlers"),
 			payload: type({ scope: "string" }),
 			schedule: dailyAt("04:00", { data: { scope: "api" } }),
 		})
@@ -130,7 +130,7 @@ describe("scheduling over redis", () => {
 
 		const written = await queue.getJobSchedulers()
 
-		expect(written.map((scheduler) => scheduler.key)).toEqual([`juibs.${rotateKeys.name}`])
+		expect(written.map((scheduler) => scheduler.key)).toEqual([`jubs.${rotateKeys.name}`])
 		expect(written[0]?.tz).toBe("UTC")
 
 		await second.close()
@@ -139,7 +139,7 @@ describe("scheduling over redis", () => {
 	test("a scheduled job runs with origin schedule, and the same job enqueued by hand with origin direct", async () => {
 		const pingHealth = defineJob({
 			name: scoped("health.ping"),
-			queue: scoped("juibs.test.schedule.origin"),
+			queue: scoped("jubs.test.schedule.origin"),
 			payload: type({ target: "string" }),
 			schedule: every("1 second", { data: { target: "api" } }),
 		})
@@ -168,7 +168,7 @@ describe("scheduling over redis", () => {
 	test("a start whose cron redis refuses names the job and the pattern", async () => {
 		const sweepLogs = defineJob({
 			name: scoped("logs.sweep"),
-			queue: scoped("juibs.test.schedule.refused"),
+			queue: scoped("jubs.test.schedule.refused"),
 			payload: type({ scope: "string" }),
 			schedule: cron("a b c", { data: { scope: "all" } }),
 		})
@@ -179,7 +179,7 @@ describe("scheduling over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection), definitions: [sweepLogs] })
 
 		expect(() => jobs.start([defineHandler(sweepLogs, async () => {})])).toThrow(
-			`juibs: redis refused the schedule of the job "${sweepLogs.name}" — correct the pattern "a b c"`,
+			`jubs: redis refused the schedule of the job "${sweepLogs.name}" — correct the pattern "a b c"`,
 		)
 
 		expect(await queue.getJobSchedulers()).toEqual([])

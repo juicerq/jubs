@@ -64,7 +64,7 @@ describe("a result schema over redis", () => {
 	test("keeps the validated value, so a repeated key replays it instead of the raw one", async () => {
 		const settleInvoice = defineJob({
 			name: scoped("billing.settle"),
-			queue: scoped("juibs.test.result.replay"),
+			queue: scoped("jubs.test.result.replay"),
 			payload: type({ invoiceId: "string" }),
 			result: type({ total: "string.numeric.parse" }),
 			idempotencyKey: (data) => data.invoiceId,

@@ -62,7 +62,7 @@ class HandlerTimeoutError extends Error implements StillRunning {
 
 	constructor(name: string, timeoutMs: number, running: Promise<unknown>) {
 		super(
-			`juibs: the job "${name}" ran past its \`timeoutMs\` of ${timeoutMs}ms — its signal was aborted and the attempt failed, while the handler body kept running`,
+			`jubs: the job "${name}" ran past its \`timeoutMs\` of ${timeoutMs}ms — its signal was aborted and the attempt failed, while the handler body kept running`,
 		)
 		this.name = "HandlerTimeoutError"
 		this.running = running
@@ -184,7 +184,7 @@ function handlersByName(handlers: JobHandler[]): Map<string, JobHandler> {
 
 		if (byName.has(name)) {
 			throw new Error(
-				`juibs: two handlers are registered for the job "${name}" — a job name takes exactly one handler`,
+				`jubs: two handlers are registered for the job "${name}" — a job name takes exactly one handler`,
 			)
 		}
 
@@ -210,7 +210,7 @@ function assertEveryDefinitionRuns(
 	}
 
 	throw new Error(
-		`juibs: the job "${orphan.name}" is registered on the started queue "${orphan.queue}" but no handler runs it — pass its handler to start(), or drop it from createJobs({ definitions })`,
+		`jubs: the job "${orphan.name}" is registered on the started queue "${orphan.queue}" but no handler runs it — pass its handler to start(), or drop it from createJobs({ definitions })`,
 	)
 }
 
@@ -225,7 +225,7 @@ function assertEveryTunedQueueStarted(tuned: string[], queues: string[]): void {
 	const names = queues.map((queue) => `"${queue}"`).join(", ")
 
 	throw new Error(
-		`juibs: start() was given tuning for the queue "${stray}", which no handler starts — the started queues are ${names}`,
+		`jubs: start() was given tuning for the queue "${stray}", which no handler starts — the started queues are ${names}`,
 	)
 }
 
@@ -238,7 +238,7 @@ function assertNoQueueConsumesADeadQueue(deadQueues: Set<string>, queues: string
 	}
 
 	throw new Error(
-		`juibs: start() would open a worker on "${deadQueueName(guarded)}", which is the dead queue of "${guarded}" — a dead queue is consumed by nobody, so rename that queue or drop "${guarded}" from createJobs({ deadQueues })`,
+		`jubs: start() would open a worker on "${deadQueueName(guarded)}", which is the dead queue of "${guarded}" — a dead queue is consumed by nobody, so rename that queue or drop "${guarded}" from createJobs({ deadQueues })`,
 	)
 }
 
@@ -251,7 +251,7 @@ async function scheduleUpsert(
 		const reason = error instanceof Error ? error.message : String(error)
 
 		throw new Error(
-			`juibs: the schedule of the job "${definition.name}" carries no payload its schema accepts — a scheduled job has no producer to pass one, so give the schedule its own \`data\`, as in every("5 minutes", { data: { ... } }) — ${reason}`,
+			`jubs: the schedule of the job "${definition.name}" carries no payload its schema accepts — a scheduled job has no producer to pass one, so give the schedule its own \`data\`, as in every("5 minutes", { data: { ... } }) — ${reason}`,
 			{ cause: error },
 		)
 	})
@@ -260,7 +260,7 @@ async function scheduleUpsert(
 
 	if (delivery.delayMs !== undefined) {
 		throw new Error(
-			`juibs: the job "${definition.name}" has a schedule and a delivery \`delayMs\` — a delay postpones one enqueue, which a recurrence has no place for, so drop \`delayMs\` from its delivery`,
+			`jubs: the job "${definition.name}" has a schedule and a delivery \`delayMs\` — a delay postpones one enqueue, which a recurrence has no place for, so drop \`delayMs\` from its delivery`,
 		)
 	}
 
@@ -326,7 +326,7 @@ async function openConsumers(driver: JobDriver, requests: ConsumeRequest[]): Pro
 	await Promise.all(
 		opened.map((consumer) =>
 			consumer.close().catch((error: unknown) => {
-				console.error("juibs: a consumer opened before start failed could not be closed", error)
+				console.error("jubs: a consumer opened before start failed could not be closed", error)
 			}),
 		),
 	)
@@ -403,7 +403,7 @@ export async function startRuntime(
 		const handler = byName.get(envelope.name)
 
 		if (!handler) {
-			throw unrecoverable(new Error(`juibs: no handler is registered for job "${envelope.name}"`))
+			throw unrecoverable(new Error(`jubs: no handler is registered for job "${envelope.name}"`))
 		}
 
 		assertVersionIsKnown(handler.definition, envelope)
@@ -516,7 +516,7 @@ export async function startRuntime(
 				.bury(event.queue, dead ? { ...buried, children: dead.results } : buried)
 				.catch((refused: unknown) => {
 					console.error(
-						`juibs: the dead queue did not keep job "${event.name}"; the job outcome is unchanged`,
+						`jubs: the dead queue did not keep job "${event.name}"; the job outcome is unchanged`,
 						refused,
 					)
 				})
@@ -570,7 +570,7 @@ export async function startRuntime(
 		}
 
 		sweepCancellations().catch((error: unknown) => {
-			console.error("juibs: the cancellations of the running jobs could not be read", error)
+			console.error("jubs: the cancellations of the running jobs could not be read", error)
 		})
 	}, CANCEL_SWEEP_MS)
 
@@ -603,7 +603,7 @@ export async function startRuntime(
 		}
 
 		drained.catch((error: unknown) => {
-			console.error("juibs: a consumer left running past close() could not be closed", error)
+			console.error("jubs: a consumer left running past close() could not be closed", error)
 		})
 	}
 

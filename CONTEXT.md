@@ -1,4 +1,4 @@
-# juibs
+# jubs
 
 A typed job library over BullMQ. It gives a job a name, a payload schema, a delivery policy and a place to run, so producers and consumers never share code.
 

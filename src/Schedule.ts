@@ -52,7 +52,7 @@ function intervalMs(interval: string): number {
 
 	if (unitMs === undefined || count <= 0) {
 		throw new Error(
-			`juibs: every("${interval}") is not an interval — give a whole count above zero and a unit of second, minute, hour or day, as in every("5 minutes")`,
+			`jubs: every("${interval}") is not an interval — give a whole count above zero and a unit of second, minute, hour or day, as in every("5 minutes")`,
 		)
 	}
 
@@ -66,7 +66,7 @@ function timeFields(time: string): { hour: number; minute: number } {
 
 	if (!parsed) {
 		throw new Error(
-			`juibs: "${time}" is not a time — give "HH:MM" in 24 hours, as in dailyAt("09:30")`,
+			`jubs: "${time}" is not a time — give "HH:MM" in 24 hours, as in dailyAt("09:30")`,
 		)
 	}
 
@@ -78,13 +78,13 @@ export function assertTimezone(timezone: string): void {
 		new Intl.DateTimeFormat(undefined, { timeZone: timezone })
 	} catch {
 		throw new Error(
-			`juibs: "${timezone}" is not a time zone — give an IANA name, as in "America/Sao_Paulo"`,
+			`jubs: "${timezone}" is not a time zone — give an IANA name, as in "America/Sao_Paulo"`,
 		)
 	}
 }
 
 const EVERY_TIMEZONE_FIX =
-	"juibs: every() takes no timezone — an interval recurrence has no time of day to shift, so write dailyAt, weeklyOn, monthlyOn or cron when the time zone matters"
+	"jubs: every() takes no timezone — an interval recurrence has no time of day to shift, so write dailyAt, weeklyOn, monthlyOn or cron when the time zone matters"
 
 function scheduleOf<Data>(recurrence: Recurrence, options?: ScheduleOptions<Data>): Schedule<Data> {
 	if (options?.timezone) {
@@ -131,7 +131,7 @@ export function monthlyOn<Data = never>(
 ): Schedule<Data> {
 	if (!Number.isInteger(dayOfMonth) || dayOfMonth < 1 || dayOfMonth > 31) {
 		throw new Error(
-			`juibs: monthlyOn(${dayOfMonth}) is not a day of the month — give a whole day from 1 to 31, as in monthlyOn(1, "09:00")`,
+			`jubs: monthlyOn(${dayOfMonth}) is not a day of the month — give a whole day from 1 to 31, as in monthlyOn(1, "09:00")`,
 		)
 	}
 

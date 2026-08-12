@@ -1,18 +1,18 @@
 {
-	"name": "@juicerq/juibs",
+	"name": "@juicerq/jubs",
 	"version": "0.0.0",
 	"description": "A typed job library over BullMQ",
 	"license": "MIT",
 	"author": "juicerq",
 	"type": "module",
 	"sideEffects": false,
-	"homepage": "https://github.com/juicerq/juibs#readme",
+	"homepage": "https://github.com/juicerq/jubs#readme",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/juicerq/juibs.git"
+		"url": "git+https://github.com/juicerq/jubs.git"
 	},
 	"bugs": {
-		"url": "https://github.com/juicerq/juibs/issues"
+		"url": "https://github.com/juicerq/jubs/issues"
 	},
 	"keywords": [
 		"bullmq",

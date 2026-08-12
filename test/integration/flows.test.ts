@@ -103,7 +103,7 @@ afterAll(async () => {
 
 describe("a flow over redis", () => {
 	test("runs the parent only after every child, with their results at hand", async () => {
-		const reportQueue = scoped("juibs.test.flow.report")
+		const reportQueue = scoped("jubs.test.flow.report")
 
 		const fetchRows = defineJob({
 			name: scoped("report.fetch"),
@@ -163,8 +163,8 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("carries a grandchild's result up to its own parent, across two queues", async () => {
-		const topQueue = scoped("juibs.test.flow.top")
-		const midQueue = scoped("juibs.test.flow.mid")
+		const topQueue = scoped("jubs.test.flow.top")
+		const midQueue = scoped("jubs.test.flow.mid")
 
 		const readLeaf = defineJob({
 			name: scoped("chain.leaf"),
@@ -226,8 +226,8 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("keeps two child definitions sharing one queue apart", async () => {
-		const parentQueue = scoped("juibs.test.flow.shared-parent")
-		const sharedQueue = scoped("juibs.test.flow.shared")
+		const parentQueue = scoped("jubs.test.flow.shared-parent")
+		const sharedQueue = scoped("jubs.test.flow.shared")
 
 		const chargeCard = defineJob({
 			name: scoped("shared.charge"),
@@ -288,8 +288,8 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("fails a child whose returned value its own result schema refuses, without another attempt", async () => {
-		const parentQueue = scoped("juibs.test.flow.refused-parent")
-		const childQueue = scoped("juibs.test.flow.refused")
+		const parentQueue = scoped("jubs.test.flow.refused-parent")
+		const childQueue = scoped("jubs.test.flow.refused")
 
 		const renderPdf = defineJob({
 			name: scoped("refused.render"),
@@ -341,7 +341,7 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("buries the parent with the reason child_dead, keeping what the other children returned", async () => {
-		const flowQueue = scoped("juibs.test.flow.dead")
+		const flowQueue = scoped("jubs.test.flow.dead")
 
 		const chargeCard = defineJob({
 			name: scoped("dead.charge"),
@@ -405,7 +405,7 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("buries the parent and the grandparent when a grandchild fails for good", async () => {
-		const flowQueue = scoped("juibs.test.flow.nested-dead")
+		const flowQueue = scoped("jubs.test.flow.nested-dead")
 
 		const readLeaf = defineJob({
 			name: scoped("nested.leaf"),
@@ -467,8 +467,8 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("refuses a definition declaring unique before anything reaches redis", async () => {
-		const parentQueue = scoped("juibs.test.flow.unique-parent")
-		const childQueue = scoped("juibs.test.flow.unique")
+		const parentQueue = scoped("jubs.test.flow.unique-parent")
+		const childQueue = scoped("jubs.test.flow.unique")
 
 		const reconcileOnce = defineJob({
 			name: scoped("unique.reconcile"),
@@ -512,7 +512,7 @@ describe("a flow over redis", () => {
 	}, 30_000)
 
 	test("reads no children, and no flow state, for a job enqueued outside a flow", async () => {
-		const plainQueue = scoped("juibs.test.flow.plain")
+		const plainQueue = scoped("jubs.test.flow.plain")
 
 		const renderPdf = defineJob({
 			name: scoped("plain.render"),
@@ -554,7 +554,7 @@ describe("a flow over redis", () => {
 
 describe("cancelling over redis", () => {
 	test("refuses a flow root whose descendant is running, and cancels nothing", async () => {
-		const flowQueue = scoped("juibs.test.flow.cancel-busy")
+		const flowQueue = scoped("jubs.test.flow.cancel-busy")
 
 		const holdLine = defineJob({
 			name: scoped("cancel.hold"),
@@ -615,7 +615,7 @@ describe("cancelling over redis", () => {
 	}, 30_000)
 
 	test("removes a flow root no descendant is running, with the children it waits on", async () => {
-		const flowQueue = scoped("juibs.test.flow.cancel-idle")
+		const flowQueue = scoped("jubs.test.flow.cancel-idle")
 
 		const holdLine = defineJob({
 			name: scoped("idle.hold"),
@@ -652,7 +652,7 @@ describe("cancelling over redis", () => {
 	}, 30_000)
 
 	test("aborts an ordinary job that is already running", async () => {
-		const plainQueue = scoped("juibs.test.flow.cancel-plain")
+		const plainQueue = scoped("jubs.test.flow.cancel-plain")
 
 		const holdLine = defineJob({
 			name: scoped("plain.hold"),
@@ -697,8 +697,8 @@ describe("cancelling over redis", () => {
 
 describe("an idempotencyKey inside a flow over redis", () => {
 	test("is refused on a node that waits on children, before anything reaches redis", async () => {
-		const parentQueue = scoped("juibs.test.flow.idem-parent")
-		const childQueue = scoped("juibs.test.flow.idem-child")
+		const parentQueue = scoped("jubs.test.flow.idem-parent")
+		const childQueue = scoped("jubs.test.flow.idem-child")
 
 		const renderPdf = defineJob({
 			name: scoped("idem.render"),
@@ -742,7 +742,7 @@ describe("an idempotencyKey inside a flow over redis", () => {
 	}, 30_000)
 
 	test("stays in force on a leaf, and replays its result for a later job", async () => {
-		const flowQueue = scoped("juibs.test.flow.idem-leaf")
+		const flowQueue = scoped("jubs.test.flow.idem-leaf")
 
 		const settleInvoice = defineJob({
 			name: scoped("idem.settle"),
@@ -798,7 +798,7 @@ describe("an idempotencyKey inside a flow over redis", () => {
 
 describe("a buried flow job over redis", () => {
 	test("refuses a replay, and is repaired by retrying the child and then the parent", async () => {
-		const flowQueue = scoped("juibs.test.flow.repair")
+		const flowQueue = scoped("jubs.test.flow.repair")
 
 		const chargeCard = defineJob({
 			name: scoped("repair.charge"),
@@ -880,7 +880,7 @@ describe("a buried flow job over redis", () => {
 
 describe("a child swept by removeOnComplete over redis", () => {
 	test("still reaches its parent after redis dropped its hash", async () => {
-		const flowQueue = scoped("juibs.test.flow.swept")
+		const flowQueue = scoped("jubs.test.flow.swept")
 
 		const readFast = defineJob({
 			name: scoped("swept.fast"),
@@ -968,8 +968,8 @@ describe("a child swept by removeOnComplete over redis", () => {
 
 describe("a definition name inside a flow over redis", () => {
 	test("is refused for a child when it holds a character the child id cannot carry", async () => {
-		const parentQueue = scoped("juibs.test.flow.name-parent")
-		const childQueue = scoped("juibs.test.flow.name-child")
+		const parentQueue = scoped("jubs.test.flow.name-parent")
+		const childQueue = scoped("jubs.test.flow.name-child")
 
 		const sendInvoice = defineJob({
 			name: scoped("name.send"),
@@ -1024,7 +1024,7 @@ describe("a definition name inside a flow over redis", () => {
 	}, 30_000)
 
 	test("is left alone for a root, which carries no id of ours", async () => {
-		const flowQueue = scoped("juibs.test.flow.name-root")
+		const flowQueue = scoped("jubs.test.flow.name-root")
 
 		const renderPdf = defineJob({
 			name: scoped("root.render"),
@@ -1068,8 +1068,8 @@ describe("a definition name inside a flow over redis", () => {
 
 describe("cancelling one child of a flow over redis", () => {
 	test("removes a child that has not started, and the parent runs short by it", async () => {
-		const parentQueue = scoped("juibs.test.flow.branch-parent")
-		const childQueue = scoped("juibs.test.flow.branch-child")
+		const parentQueue = scoped("jubs.test.flow.branch-parent")
+		const childQueue = scoped("jubs.test.flow.branch-child")
 
 		const readRows = defineJob({
 			name: scoped("branch.read"),
@@ -1161,8 +1161,8 @@ describe("cancelling one child of a flow over redis", () => {
 	}, 30_000)
 
 	test("aborts the same child once it is active, and buries the parent with child_dead", async () => {
-		const parentQueue = scoped("juibs.test.flow.branch-active-parent")
-		const childQueue = scoped("juibs.test.flow.branch-active-child")
+		const parentQueue = scoped("jubs.test.flow.branch-active-parent")
+		const childQueue = scoped("jubs.test.flow.branch-active-child")
 
 		const readRows = defineJob({
 			name: scoped("active.read"),
@@ -1248,7 +1248,7 @@ describe("cancelling one child of a flow over redis", () => {
 
 describe("a child result schema over redis", () => {
 	test("runs twice, so a transform json does not survive kills the parent for good", async () => {
-		const flowQueue = scoped("juibs.test.flow.twice")
+		const flowQueue = scoped("jubs.test.flow.twice")
 
 		const countRows = defineJob({
 			name: scoped("twice.count"),
@@ -1304,7 +1304,7 @@ describe("a child result schema over redis", () => {
 	}, 30_000)
 
 	test("passes both times when the transform survives json", async () => {
-		const flowQueue = scoped("juibs.test.flow.twice-idempotent")
+		const flowQueue = scoped("jubs.test.flow.twice-idempotent")
 
 		const countRows = defineJob({
 			name: scoped("idempotent.count"),

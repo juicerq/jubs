@@ -39,27 +39,27 @@ import {
 import { composeJobId } from "@/JobId"
 import { ShutdownAbortError } from "@/Shutdown"
 
-const SCHEDULER_PREFIX = "juibs."
+const SCHEDULER_PREFIX = "jubs."
 
-const SCRIPT_QUEUE = "juibs.scripts"
+const SCRIPT_QUEUE = "jubs.scripts"
 
-export const IDEMPOTENCY_KEY_PREFIX = "juibs:idem:"
+export const IDEMPOTENCY_KEY_PREFIX = "jubs:idem:"
 
-export const CANCEL_KEY_PREFIX = "juibs:cancel:"
+export const CANCEL_KEY_PREFIX = "jubs:cancel:"
 
 export const RUNNING_PREFIX = "running:"
 
-const ACQUIRE_COMMAND = "juibsIdempotencyAcquire"
+const ACQUIRE_COMMAND = "jubsIdempotencyAcquire"
 
-const RENEW_COMMAND = "juibsIdempotencyRenew"
+const RENEW_COMMAND = "jubsIdempotencyRenew"
 
-const COMPLETE_COMMAND = "juibsIdempotencyComplete"
+const COMPLETE_COMMAND = "jubsIdempotencyComplete"
 
-const RELEASE_COMMAND = "juibsIdempotencyRelease"
+const RELEASE_COMMAND = "jubsIdempotencyRelease"
 
-const TAKE_CANCELLED_COMMAND = "juibsTakeCancelled"
+const TAKE_CANCELLED_COMMAND = "jubsTakeCancelled"
 
-const READ_FLOW_COMMAND = "juibsReadFlow"
+const READ_FLOW_COMMAND = "jubsReadFlow"
 
 const ACQUIRE_LUA = `
 local current = redis.call("GET", KEYS[1])
@@ -150,7 +150,7 @@ function schedulerId(jobName: string): string {
 }
 
 const BLOCKING_CONNECTION_FIX =
-	"juibs: the Redis connection passed to redisDriver must be created with `maxRetriesPerRequest: null`, because a BullMQ worker opens a blocking connection — new Redis(url, { maxRetriesPerRequest: null })"
+	"jubs: the Redis connection passed to redisDriver must be created with `maxRetriesPerRequest: null`, because a BullMQ worker opens a blocking connection — new Redis(url, { maxRetriesPerRequest: null })"
 
 interface ConnectionShape {
 	readonly isCluster?: boolean
@@ -228,7 +228,7 @@ function refusedSchedule(schedule: ScheduleUpsert, error: unknown): Error {
 	const reason = error instanceof Error ? error.message : String(error)
 
 	return new Error(
-		`juibs: redis refused the schedule of the job "${schedule.envelope.name}" — correct ${refusedRecurrence(schedule)} its definition declares, or the time zone it runs in — ${reason}`,
+		`jubs: redis refused the schedule of the job "${schedule.envelope.name}" — correct ${refusedRecurrence(schedule)} its definition declares, or the time zone it runs in — ${reason}`,
 		{ cause: error },
 	)
 }
@@ -359,10 +359,10 @@ async function openScriptClient(connection: ConnectionOptions): Promise<RedisCli
 }
 
 /**
- * Opens the one client every juibs script runs on, the first time a script
+ * Opens the one client every jubs script runs on, the first time a script
  * needs it.
  *
- * A script juibs registers is not a command BullMQ exposes, so it is declared
+ * A script jubs registers is not a command BullMQ exposes, so it is declared
  * once per client with `defineCommand` and called with `runCommand`. The client
  * comes from a `Queue` handle opened with `skipMetasUpdate`, so the handle
  * writes no key of its own and every store shares the caller's connection. The
@@ -393,7 +393,7 @@ export function readLease(reply: unknown, token: string): IdempotencyLease {
 }
 
 /**
- * Keeps the three idempotency states in Redis, under the `juibs:idem:` prefix.
+ * Keeps the three idempotency states in Redis, under the `jubs:idem:` prefix.
  *
  * Every operation is a Lua script registered once per client, so reading the key
  * and acting on it is one atomic step, and the narrow `IRedisClient` interface —
@@ -578,7 +578,7 @@ async function reschedule(
 ): Promise<never> {
 	if (!token) {
 		throw new Error(
-			`juibs: redis delivered job "${job.name}" without a worker token, and this delivery asked to be delivered again instead of failing — juibs cannot reschedule it without the token, so it fails the attempt instead`,
+			`jubs: redis delivered job "${job.name}" without a worker token, and this delivery asked to be delivered again instead of failing — jubs cannot reschedule it without the token, so it fails the attempt instead`,
 			{ cause: postponed },
 		)
 	}
@@ -650,7 +650,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			)
 
 			if (!job.id) {
-				throw new Error(`juibs: redis stored job "${request.envelope.name}" without an id`)
+				throw new Error(`jubs: redis stored job "${request.envelope.name}" without an id`)
 			}
 
 			return { id: job.id }
@@ -787,7 +787,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 				const id = tree?.job.id
 
 				if (!id) {
-					throw new Error(`juibs: redis stored the flow "${root.envelope.name}" without an id`)
+					throw new Error(`jubs: redis stored the flow "${root.envelope.name}" without an id`)
 				}
 
 				return { id }
@@ -845,7 +845,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 				request.queue,
 				async (job, token) => {
 					if (!job.id) {
-						throw new Error(`juibs: redis delivered job "${job.name}" without an id`)
+						throw new Error(`jubs: redis delivered job "${job.name}" without an id`)
 					}
 
 					return request

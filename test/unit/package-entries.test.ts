@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { JuibsDashboard } from "@/dashboard/index"
+import { JubsDashboard } from "@/dashboard/index"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { memoryDriver } from "@/testing/index"
 
@@ -16,6 +16,6 @@ describe("package entries", () => {
 	})
 
 	test("every other subpath exposes its namespace", () => {
-		expect(JuibsDashboard).toEqual({})
+		expect(JubsDashboard).toEqual({})
 	})
 })

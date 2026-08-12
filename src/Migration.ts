@@ -8,7 +8,7 @@ export type PayloadMigration = (data: unknown) => unknown
 export class VersionAheadError extends UnrecoverableError {
 	constructor(jobName: string, stored: number, running: number) {
 		super(
-			`juibs: the job "${jobName}" stored a payload of version ${stored}, and this process runs version ${running} — a newer deploy wrote it, so this process cannot read it`,
+			`jubs: the job "${jobName}" stored a payload of version ${stored}, and this process runs version ${running} — a newer deploy wrote it, so this process cannot read it`,
 		)
 		this.name = "VersionAheadError"
 	}
@@ -32,7 +32,7 @@ function stepOf(definition: JobDefinition, from: number): PayloadMigration {
 	}
 
 	throw new Error(
-		`juibs: the job "${definition.name}" stored a payload of version ${from} and declares no migration from it — add \`migrations: { ${from}: (data) => ... }\` to its definition`,
+		`jubs: the job "${definition.name}" stored a payload of version ${from} and declares no migration from it — add \`migrations: { ${from}: (data) => ... }\` to its definition`,
 	)
 }
 
@@ -52,7 +52,7 @@ export async function migrateEnvelope(
 			data = await step(data)
 		} catch (error) {
 			throw new Error(
-				`juibs: the migration of job "${definition.name}" from version ${from} to ${from + 1} threw — ${serializeError(error).message}`,
+				`jubs: the migration of job "${definition.name}" from version ${from} to ${from + 1} threw — ${serializeError(error).message}`,
 				{ cause: error },
 			)
 		}

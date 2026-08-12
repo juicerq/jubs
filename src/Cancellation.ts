@@ -37,7 +37,7 @@ export interface RunningDelivery {
 }
 
 /**
- * The reason juibs aborts a handler's signal when `jobs.cancel(id)` reaches the
+ * The reason jubs aborts a handler's signal when `jobs.cancel(id)` reaches the
  * job, and the error the delivery then fails with.
  *
  * It is a job failure and the opposite of a `ShutdownAbortError`: the job is not
@@ -59,7 +59,7 @@ export class CancelledError extends UnrecoverableError {
 
 	constructor(name: string, running?: Promise<unknown>) {
 		super(
-			`juibs: the job "${name}" was cancelled while it ran — its signal was aborted and the attempt failed without a retry`,
+			`jubs: the job "${name}" was cancelled while it ran — its signal was aborted and the attempt failed without a retry`,
 		)
 		this.name = "CancelledError"
 		this.running = running

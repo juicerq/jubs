@@ -1,6 +1,6 @@
 # Propagate a dead child through the runtime, not through BullMQ
 
-Every node of a flow but the root is added with `ignoreDependencyOnFailure`, so a child that exhausts its attempts drops out of its parent's dependencies and leaves its reason in the parent's `:failed` hash. The parent then runs, reads that hash, finds the failure and is buried by juibs with the reason `child_dead` — where the failure hooks fire and a dead entry is kept, carrying what the children that did finish returned.
+Every node of a flow but the root is added with `ignoreDependencyOnFailure`, so a child that exhausts its attempts drops out of its parent's dependencies and leaves its reason in the parent's `:failed` hash. The parent then runs, reads that hash, finds the failure and is buried by jubs with the reason `child_dead` — where the failure hooks fire and a dead entry is kept, carrying what the children that did finish returned.
 
 `failParentOnFailure` was the alternative, and it fails the parent inside BullMQ's own worker, before our processor is called. Nothing would be buried, no hook would fire, and the grandparent would get the same treatment one level up — a whole flow dying with no record of why. Reading the failure ourselves costs one dispatch and buys the burial, the hook and the results.
 

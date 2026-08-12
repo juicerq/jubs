@@ -101,7 +101,7 @@ function readDeadJobId(id: string): { queue: string; storedId: string } {
 
 	if (live === undefined) {
 		throw new Error(
-			`juibs: "${id}" is not a dead job id — pass an id returned by jobs.dead.list(queue)`,
+			`jubs: "${id}" is not a dead job id — pass an id returned by jobs.dead.list(queue)`,
 		)
 	}
 
@@ -143,7 +143,7 @@ function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
 	const names = [...used].map((queue) => `"${queue}"`).join(", ")
 
 	throw new Error(
-		`juibs: createJobs was given the dead queue "${stray}", which no registered definition uses — the queues its definitions use are ${names}`,
+		`jubs: createJobs was given the dead queue "${stray}", which no registered definition uses — the queues its definitions use are ${names}`,
 	)
 }
 
@@ -171,13 +171,13 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 				if (!entry) {
 					throw new Error(
-						`juibs: no dead job "${id}" is kept — it was replayed or discarded already`,
+						`jubs: no dead job "${id}" is kept — it was replayed or discarded already`,
 					)
 				}
 
 				if (entry.envelope.origin === "flow") {
 					throw new Error(
-						`juibs: the dead job "${id}" is part of a flow, and replaying it would enqueue "${entry.envelope.name}" with no children at all — it would run over an empty result set and complete green. Put the flow back together instead: jobs.retry(id) on each child that failed, which returns it to its parent's dependencies, then jobs.retry("${entry.jobId}") on the parent. The ids of the children that failed are named in this entry's error. Both dead records stay where they are — drop them with jobs.dead.discard(id).`,
+						`jubs: the dead job "${id}" is part of a flow, and replaying it would enqueue "${entry.envelope.name}" with no children at all — it would run over an empty result set and complete green. Put the flow back together instead: jobs.retry(id) on each child that failed, which returns it to its parent's dependencies, then jobs.retry("${entry.jobId}") on the parent. The ids of the children that failed are named in this entry's error. Both dead records stay where they are — drop them with jobs.dead.discard(id).`,
 					)
 				}
 
@@ -187,7 +187,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 				if (!definition) {
 					throw new Error(
-						`juibs: the dead job "${id}" runs "${entry.envelope.name}", which this client does not know — register its definition in createJobs({ definitions }) to replay it`,
+						`jubs: the dead job "${id}" runs "${entry.envelope.name}", which this client does not know — register its definition in createJobs({ definitions }) to replay it`,
 					)
 				}
 
@@ -213,7 +213,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 					return
 				}
 
-				throw new Error(`juibs: no dead job "${id}" is kept — it was replayed or discarded already`)
+				throw new Error(`jubs: no dead job "${id}" is kept — it was replayed or discarded already`)
 			},
 		},
 

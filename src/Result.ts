@@ -15,7 +15,7 @@ export class ResultError extends Error {
 	constructor(jobName: string, issues: readonly StandardSchemaV1.Issue[]) {
 		const reasons = issues.map((issue) => `${readPath(issue)}: ${issue.message}`).join("; ")
 
-		super(`juibs: the result of job "${jobName}" is invalid — ${reasons}`)
+		super(`jubs: the result of job "${jobName}" is invalid — ${reasons}`)
 		this.name = "ResultError"
 	}
 }

@@ -118,7 +118,7 @@ describe("memoryDriver", () => {
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toBe(
-			'juibs: memoryDriver does not simulate "delayMs"; test that behaviour against redisDriver',
+			'jubs: memoryDriver does not simulate "delayMs"; test that behaviour against redisDriver',
 		)
 		expect(driver.enqueued(chargeCard)).toEqual([])
 	})
@@ -138,7 +138,7 @@ describe("memoryDriver", () => {
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toBe(
-			'juibs: memoryDriver does not simulate "unique"; test that behaviour against redisDriver',
+			'jubs: memoryDriver does not simulate "unique"; test that behaviour against redisDriver',
 		)
 		expect(driver.enqueued(chargeCard)).toEqual([])
 	})
@@ -230,7 +230,7 @@ describe("memoryDriver", () => {
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toBe(
-			'juibs: memoryDriver does not simulate "schedule"; test that behaviour against redisDriver',
+			'jubs: memoryDriver does not simulate "schedule"; test that behaviour against redisDriver',
 		)
 
 		const orphan = await driver.runNext().catch((error: unknown) => error)

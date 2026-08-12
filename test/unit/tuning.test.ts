@@ -86,7 +86,7 @@ describe("per-queue tuning", () => {
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toBe(
-			'juibs: memoryDriver does not simulate "limiter"; test that behaviour against redisDriver',
+			'jubs: memoryDriver does not simulate "limiter"; test that behaviour against redisDriver',
 		)
 	})
 

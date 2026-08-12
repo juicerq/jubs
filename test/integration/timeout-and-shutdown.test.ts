@@ -66,7 +66,7 @@ describe("handler timeout over redis", () => {
 	test("retries a timed-out attempt and buries the job once its attempts run out", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),
-			queue: scoped("juibs.test.timeout-dead"),
+			queue: scoped("jubs.test.timeout-dead"),
 			payload: type({ id: "string" }),
 			delivery: { attempts: 2, backoff: { type: "exponential", delayMs: 1 } },
 			timeoutMs: 100,
@@ -107,7 +107,7 @@ describe("handler timeout over redis", () => {
 	test("holds the idempotency key of a timed-out body, so no second body runs beside it", async () => {
 		const settlePayment = defineJob({
 			name: scoped("payments.settle"),
-			queue: scoped("juibs.test.timeout-idem"),
+			queue: scoped("jubs.test.timeout-idem"),
 			payload: type({ id: "string" }),
 			delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 1 } },
 			timeoutMs: 100,
@@ -153,7 +153,7 @@ describe("shutdown over redis", () => {
 	test("resolves close within its timeout when a handler ignores its signal", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),
-			queue: scoped("juibs.test.shutdown-deaf"),
+			queue: scoped("jubs.test.shutdown-deaf"),
 			payload: type({ id: "string" }),
 			delivery: { attempts: 1 },
 		})
@@ -194,7 +194,7 @@ describe("shutdown over redis", () => {
 	test("aborts the signal of a handler still running when the close timeout expires", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),
-			queue: scoped("juibs.test.shutdown-listening"),
+			queue: scoped("jubs.test.shutdown-listening"),
 			payload: type({ id: "string" }),
 			delivery: { attempts: 1 },
 		})
@@ -233,7 +233,7 @@ describe("shutdown over redis", () => {
 	test("keeps the idempotency key held when close aborts a body before its own timeoutMs", async () => {
 		const settlePayment = defineJob({
 			name: scoped("payments.settle"),
-			queue: scoped("juibs.test.shutdown-idem"),
+			queue: scoped("jubs.test.shutdown-idem"),
 			payload: type({ id: "string" }),
 			delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 1 } },
 			timeoutMs: 300,
@@ -287,7 +287,7 @@ describe("shutdown over redis", () => {
 	test("delivers a job aborted by close again, spending no attempt and burying nothing", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),
-			queue: scoped("juibs.test.shutdown-redeliver"),
+			queue: scoped("jubs.test.shutdown-redeliver"),
 			payload: type({ id: "string" }),
 			delivery: { attempts: 1 },
 		})

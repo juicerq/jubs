@@ -18,7 +18,7 @@ const ACCEPTED_DELIVERY = [
 
 function unsupported(behaviour: string): Error {
 	return new Error(
-		`juibs: memoryDriver does not simulate "${behaviour}"; test that behaviour against redisDriver`,
+		`jubs: memoryDriver does not simulate "${behaviour}"; test that behaviour against redisDriver`,
 	)
 }
 
@@ -187,18 +187,18 @@ export function memoryDriver(): MemoryDriver {
 		if (!next) {
 			if (pending.length > 0) {
 				throw new Error(
-					"juibs: memoryDriver has every pending job on a paused queue — call jobs.resume(queue) to run them",
+					"jubs: memoryDriver has every pending job on a paused queue — call jobs.resume(queue) to run them",
 				)
 			}
 
-			throw new Error("juibs: memoryDriver has no pending job to run")
+			throw new Error("jubs: memoryDriver has no pending job to run")
 		}
 
 		const run = consumers.get(next.queue)
 
 		if (!run) {
 			throw new Error(
-				`juibs: memoryDriver has no consumer on queue "${next.queue}" — call jobs.start(handlers) before running jobs`,
+				`jubs: memoryDriver has no consumer on queue "${next.queue}" — call jobs.start(handlers) before running jobs`,
 			)
 		}
 

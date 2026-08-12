@@ -63,7 +63,7 @@ afterAll(async () => {
 
 describe("dead queue over redis", () => {
 	test("keeps a job that failed every attempt where no worker consumes it", async () => {
-		const chargeCard = chargeCardOn(scoped("juibs.test.dead-keep"))
+		const chargeCard = chargeCardOn(scoped("jubs.test.dead-keep"))
 		const { live, dead } = await freshQueues(chargeCard.queue)
 
 		const jobs = createJobs({
@@ -103,7 +103,7 @@ describe("dead queue over redis", () => {
 	})
 
 	test("lists a dead job and replays it with the payload it was enqueued with", async () => {
-		const chargeCard = chargeCardOn(scoped("juibs.test.dead-replay"))
+		const chargeCard = chargeCardOn(scoped("jubs.test.dead-replay"))
 		const { live } = await freshQueues(chargeCard.queue)
 
 		const jobs = createJobs({
@@ -149,7 +149,7 @@ describe("dead queue over redis", () => {
 	test("replays a job whose uniqueness key is still taken", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.dead-unique"),
+			queue: scoped("jubs.test.dead-unique"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: {
 				attempts: 1,
@@ -196,7 +196,7 @@ describe("dead queue over redis", () => {
 	})
 
 	test("discards a dead job, and refuses an id no dead job answers to", async () => {
-		const chargeCard = chargeCardOn(scoped("juibs.test.dead-discard"))
+		const chargeCard = chargeCardOn(scoped("jubs.test.dead-discard"))
 		const { live, dead } = await freshQueues(chargeCard.queue)
 
 		const jobs = createJobs({

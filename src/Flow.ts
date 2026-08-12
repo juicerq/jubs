@@ -62,7 +62,7 @@ export class ChildDeadError extends Error {
 			.join("; ")
 
 		super(
-			`juibs: the job "${jobName}" waits on children, and one of them failed every attempt — ${reasons}`,
+			`jubs: the job "${jobName}" waits on children, and one of them failed every attempt — ${reasons}`,
 		)
 		this.name = "ChildDeadError"
 		this.results = state.results
@@ -80,7 +80,7 @@ export class ChildDeadError extends Error {
  * `unique` is refused at **every** position, because BullMQ itself forbids
  * `deduplication` beside a `parent` and on any node with children.
  * `idempotencyKey` is refused only on a node that **has** children, and that
- * one is juibs' own rule about what a job's input is: a parent is fed by its
+ * one is jubs' own rule about what a job's input is: a parent is fed by its
  * children as much as by its payload, so a key derived from the payload alone
  * names two different runs. A leaf keeps its key, because a leaf really is its
  * payload alone.
@@ -92,13 +92,13 @@ export async function composeFlow(node: FlowChild): Promise<FlowNode> {
 
 	if (delivery.unique) {
 		throw new Error(
-			`juibs: the job "${definition.name}" declares \`unique\` and takes part in a flow — uniqueness does not apply inside a flow, at any position, so drop \`unique\` from its delivery or enqueue that job on its own with jobs.enqueue`,
+			`jubs: the job "${definition.name}" declares \`unique\` and takes part in a flow — uniqueness does not apply inside a flow, at any position, so drop \`unique\` from its delivery or enqueue that job on its own with jobs.enqueue`,
 		)
 	}
 
 	if (node.children.length > 0 && definition.idempotencyKey) {
 		throw new Error(
-			`juibs: the job "${definition.name}" declares \`idempotencyKey\` and waits on children — a key derived from the payload alone would replay the result of an earlier flow that ran different children, so drop \`idempotencyKey\` from that definition or give the key to the leaves instead`,
+			`jubs: the job "${definition.name}" declares \`idempotencyKey\` and waits on children — a key derived from the payload alone would replay the result of an earlier flow that ran different children, so drop \`idempotencyKey\` from that definition or give the key to the leaves instead`,
 		)
 	}
 
@@ -127,7 +127,7 @@ function composeDependentFlow(node: FlowChild): Promise<FlowNode> {
 
 	if (stray) {
 		throw new Error(
-			`juibs: the job "${node.definition.name}" is a child of a flow and its name holds "${stray}" — a child is stored under an id built from its name, which that character breaks, so rename the job or make it the root of its own flow`,
+			`jubs: the job "${node.definition.name}" is a child of a flow and its name holds "${stray}" — a child is stored under an id built from its name, which that character breaks, so rename the job or make it the root of its own flow`,
 		)
 	}
 
