@@ -16,7 +16,7 @@ export const FLOW_ID_MARKER = "~"
  * One node of a flow, as the producer writes it: a definition, the payload it
  * takes, and the children it waits on.
  *
- * It is type-erased on purpose. Each node is typed where `child` is called,
+ * It is type-erased on purpose. Each node is typed where `childJob` is called,
  * against that definition's payload schema, and the tree it ends up in is not:
  * a heterogeneous tree carries a different type per node, which no caller can
  * spell and no reader can follow.
@@ -37,7 +37,7 @@ export interface FlowChildren {
  * It is the same pure data builder `defineJob` is — nothing is enqueued until
  * the tree it belongs to reaches `jobs.flow`.
  */
-export function child<Payload extends StandardSchemaV1>(
+export function childJob<Payload extends StandardSchemaV1>(
 	definition: JobDefinition<Payload>,
 	data: StandardSchemaV1.InferInput<Payload>,
 	options?: FlowChildren,

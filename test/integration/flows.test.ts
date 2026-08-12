@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { type Job, type JobType, Queue } from "bullmq"
 import IORedis from "ioredis"
-import { child, createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { childJob, createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { composeJobId } from "@/JobId"
 import { CANCEL_KEY_PREFIX, IDEMPOTENCY_KEY_PREFIX } from "@/RedisDriver"
 import { scoped, storedId } from "./namespace"
@@ -141,8 +141,8 @@ describe("a flow over redis", () => {
 			{ id: "rep-1" },
 			{
 				children: [
-					child(fetchRows, { source: "ledger" }),
-					child(fetchRows, { source: "invoices" }),
+					childJob(fetchRows, { source: "ledger" }),
+					childJob(fetchRows, { source: "invoices" }),
 				],
 			},
 		)
@@ -208,10 +208,15 @@ describe("a flow over redis", () => {
 			{ id: "chain-1" },
 			{
 				children: [
-					child(
+					childJob(
 						sumMid,
 						{ id: "chain-1" },
-						{ children: [child(readLeaf, { id: "leaf-a" }), child(readLeaf, { id: "leaf-b" })] },
+						{
+							children: [
+								childJob(readLeaf, { id: "leaf-a" }),
+								childJob(readLeaf, { id: "leaf-b" }),
+							],
+						},
 					),
 				],
 			},
@@ -270,9 +275,9 @@ describe("a flow over redis", () => {
 			{ id: "set-1" },
 			{
 				children: [
-					child(chargeCard, { id: "set-1" }),
-					child(reserveFunds, { id: "set-1" }),
-					child(reserveFunds, { id: "set-2" }),
+					childJob(chargeCard, { id: "set-1" }),
+					childJob(reserveFunds, { id: "set-1" }),
+					childJob(reserveFunds, { id: "set-2" }),
 				],
 			},
 		)
@@ -324,7 +329,11 @@ describe("a flow over redis", () => {
 			defineHandler(sendInvoice, async () => undefined),
 		])
 
-		await jobs.flow(sendInvoice, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] })
+		await jobs.flow(
+			sendInvoice,
+			{ id: "inv-1" },
+			{ children: [childJob(renderPdf, { id: "inv-1" })] },
+		)
 
 		await waitFor(async () => (await childrenQueue.getFailed()).length === 1)
 
@@ -385,7 +394,7 @@ describe("a flow over redis", () => {
 		const enqueued = await jobs.flow(
 			sendInvoice,
 			{ id: "inv-1" },
-			{ children: [child(chargeCard, { id: "inv-1" }), child(renderPdf, { id: "inv-1" })] },
+			{ children: [childJob(chargeCard, { id: "inv-1" }), childJob(renderPdf, { id: "inv-1" })] },
 		)
 
 		const parent = await waitForFinished(live as Queue, storedId(enqueued))
@@ -446,7 +455,7 @@ describe("a flow over redis", () => {
 			{ id: "chain-1" },
 			{
 				children: [
-					child(sumMid, { id: "chain-1" }, { children: [child(readLeaf, { id: "leaf-a" })] }),
+					childJob(sumMid, { id: "chain-1" }, { children: [childJob(readLeaf, { id: "leaf-a" })] }),
 				],
 			},
 		)
@@ -488,7 +497,7 @@ describe("a flow over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(reconcileOnce, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(reconcileOnce, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain(reconcileOnce.name)
@@ -592,7 +601,7 @@ describe("cancelling over redis", () => {
 		const enqueued = await jobs.flow(
 			closeTop,
 			{ id: "hold-1" },
-			{ children: [child(holdLine, { id: "hold-1" })] },
+			{ children: [childJob(holdLine, { id: "hold-1" })] },
 		)
 
 		const signal = await running.promise
@@ -636,7 +645,7 @@ describe("cancelling over redis", () => {
 		const enqueued = await jobs.flow(
 			closeTop,
 			{ id: "idle-1" },
-			{ children: [child(holdLine, { id: "idle-1" })] },
+			{ children: [childJob(holdLine, { id: "idle-1" })] },
 		)
 
 		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "removed" })
@@ -718,7 +727,7 @@ describe("an idempotencyKey inside a flow over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain(sendInvoice.name)
@@ -779,7 +788,7 @@ describe("an idempotencyKey inside a flow over redis", () => {
 		const enqueued = await jobs.flow(
 			closeTop,
 			{ id: "inv-1" },
-			{ children: [child(settleInvoice, { invoiceId: "inv-1" })] },
+			{ children: [childJob(settleInvoice, { invoiceId: "inv-1" })] },
 		)
 
 		await waitForFinished(live as Queue, storedId(enqueued))
@@ -841,7 +850,7 @@ describe("a buried flow job over redis", () => {
 		const enqueued = await jobs.flow(
 			sendInvoice,
 			{ id: "inv-1" },
-			{ children: [child(chargeCard, { id: "inv-1" })] },
+			{ children: [childJob(chargeCard, { id: "inv-1" })] },
 		)
 
 		await waitForFinished(live as Queue, storedId(enqueued))
@@ -940,7 +949,7 @@ describe("a child swept by removeOnComplete over redis", () => {
 		const enqueued = await jobs.flow(
 			closeTop,
 			{ id: "swept-1" },
-			{ children: [child(readFast, { id: "fast-1" }), child(readSlow, { id: "slow-1" })] },
+			{ children: [childJob(readFast, { id: "fast-1" }), childJob(readSlow, { id: "slow-1" })] },
 		)
 
 		const fastId = storedId({ id: await fast.promise })
@@ -994,11 +1003,11 @@ describe("a definition name inside a flow over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 
 		const colon = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(colonName, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(colonName, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		const marker = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(markerName, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(markerName, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((colon as Error).message).toContain(colonName.name)
@@ -1054,7 +1063,7 @@ describe("a definition name inside a flow over redis", () => {
 		const enqueued = await jobs.flow(
 			sendInvoice,
 			{ id: "inv-1" },
-			{ children: [child(renderPdf, { id: "inv-1" })] },
+			{ children: [childJob(renderPdf, { id: "inv-1" })] },
 		)
 
 		const parent = await waitForFinished(live as Queue, storedId(enqueued))
@@ -1132,7 +1141,10 @@ describe("cancelling one child of a flow over redis", () => {
 			closeTop,
 			{ id: "rep-1" },
 			{
-				children: [child(buildReport, { id: "rep-1" }), child(readRows, { source: "ledger" })],
+				children: [
+					childJob(buildReport, { id: "rep-1" }),
+					childJob(readRows, { source: "ledger" }),
+				],
 			},
 		)
 
@@ -1217,7 +1229,10 @@ describe("cancelling one child of a flow over redis", () => {
 			closeTop,
 			{ id: "rep-1" },
 			{
-				children: [child(buildReport, { id: "rep-1" }), child(readRows, { source: "ledger" })],
+				children: [
+					childJob(buildReport, { id: "rep-1" }),
+					childJob(readRows, { source: "ledger" }),
+				],
 			},
 		)
 
@@ -1283,7 +1298,7 @@ describe("a child result schema over redis", () => {
 		const enqueued = await jobs.flow(
 			closeTop,
 			{ id: "rep-1" },
-			{ children: [child(countRows, { source: "ledger" })] },
+			{ children: [childJob(countRows, { source: "ledger" })] },
 		)
 
 		const parent = await waitForFinished(live as Queue, storedId(enqueued))
@@ -1338,7 +1353,7 @@ describe("a child result schema over redis", () => {
 		const enqueued = await jobs.flow(
 			closeTop,
 			{ id: "rep-1" },
-			{ children: [child(countRows, { source: "ledger" })] },
+			{ children: [childJob(countRows, { source: "ledger" })] },
 		)
 
 		const parent = await waitForFinished(live as Queue, storedId(enqueued))

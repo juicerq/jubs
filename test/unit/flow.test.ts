@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
 import {
-	child,
+	childJob,
 	createJobs,
 	DELIVERY_DEFAULTS,
 	defineHandler,
@@ -55,8 +55,12 @@ describe("jobs.flow", () => {
 			{ id: "inv-1" },
 			{
 				children: [
-					child(renderPdf, { id: "inv-1" }),
-					child(chargeCard, { id: "inv-1" }, { children: [child(reserveFunds, { id: "inv-1" })] }),
+					childJob(renderPdf, { id: "inv-1" }),
+					childJob(
+						chargeCard,
+						{ id: "inv-1" },
+						{ children: [childJob(reserveFunds, { id: "inv-1" })] },
+					),
 				],
 			},
 		)
@@ -106,7 +110,7 @@ describe("jobs.flow", () => {
 		const jobs = createJobs({ driver })
 
 		const failure = await jobs
-			.flow(reconcileOnce, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] })
+			.flow(reconcileOnce, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("invoice.reconcile")
@@ -119,7 +123,7 @@ describe("jobs.flow", () => {
 		const jobs = createJobs({ driver })
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(reconcileOnce, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(reconcileOnce, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("invoice.reconcile")
@@ -134,7 +138,7 @@ describe("jobs.flow", () => {
 			.flow(
 				sendInvoice,
 				{ id: "inv-1" },
-				{ children: [child(renderPdf, { id: 1 as unknown as string })] },
+				{ children: [childJob(renderPdf, { id: 1 as unknown as string })] },
 			)
 			.catch((error: unknown) => error)
 
@@ -152,11 +156,11 @@ describe("jobs.flow", () => {
 				{ id: "inv-1" },
 				{
 					children: [
-						child(
+						childJob(
 							chargeCard,
 							{ id: "inv-1" },
 							{
-								children: [child(reserveFunds, { id: 1 as unknown as string })],
+								children: [childJob(reserveFunds, { id: 1 as unknown as string })],
 							},
 						),
 					],
@@ -337,7 +341,7 @@ describe("memoryDriver", () => {
 		const jobs = createJobs({ driver })
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("memoryDriver does not simulate")
@@ -375,7 +379,7 @@ describe("idempotencyKey inside a flow", () => {
 		const jobs = createJobs({ driver })
 
 		const failure = await jobs
-			.flow(settleOnce, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] })
+			.flow(settleOnce, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("invoice.settle")
@@ -393,7 +397,11 @@ describe("idempotencyKey inside a flow", () => {
 				{ id: "inv-1" },
 				{
 					children: [
-						child(settleOnce, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] }),
+						childJob(
+							settleOnce,
+							{ id: "inv-1" },
+							{ children: [childJob(renderPdf, { id: "inv-1" })] },
+						),
 					],
 				},
 			)
@@ -410,7 +418,7 @@ describe("idempotencyKey inside a flow", () => {
 		await jobs.flow(
 			sendInvoice,
 			{ id: "inv-1" },
-			{ children: [child(settleOnce, { id: "inv-1" })] },
+			{ children: [childJob(settleOnce, { id: "inv-1" })] },
 		)
 
 		expect(driver.flows[0]?.children[0]?.envelope.name).toBe("invoice.settle")
@@ -460,7 +468,7 @@ describe("a definition name a job id cannot carry", () => {
 		})
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(colon, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(colon, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("billing:invoice.render")
@@ -479,7 +487,7 @@ describe("a definition name a job id cannot carry", () => {
 		})
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [child(tilde, { id: "inv-1" })] })
+			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(tilde, { id: "inv-1" })] })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("invoice~render")
@@ -496,7 +504,7 @@ describe("a definition name a job id cannot carry", () => {
 			payload: type({ id: "string" }),
 		})
 
-		await jobs.flow(colon, { id: "inv-1" }, { children: [child(renderPdf, { id: "inv-1" })] })
+		await jobs.flow(colon, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
 
 		expect(driver.flows[0]?.envelope.name).toBe("billing:invoice.send")
 	})

@@ -34,7 +34,7 @@ export type {
 } from "@/Driver"
 export type { Envelope, TraceContext } from "@/Envelope"
 export type { SerializedError } from "@/Failure"
-export { child, type FlowChild, type FlowChildren } from "@/Flow"
+export { childJob, type FlowChild, type FlowChildren } from "@/Flow"
 export type { JobEvent, JobFailureEvent, JobHooks } from "@/Hooks"
 export { type IdempotencyStore, LeaseHeldError } from "@/Idempotency"
 export { type PayloadMigration, VersionAheadError } from "@/Migration"

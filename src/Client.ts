@@ -3,7 +3,7 @@ import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
 import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type { CancelResult, EnqueuedJob, JobDriver, JobSnapshot, RetryResult } from "@/Driver"
-import { child, composeFlow, type FlowChildren } from "@/Flow"
+import { childJob, composeFlow, type FlowChildren } from "@/Flow"
 import type { JobHooks } from "@/Hooks"
 import { composeJobId, readJobId } from "@/JobId"
 import { migrateEnvelope } from "@/Migration"
@@ -25,7 +25,7 @@ export interface JobsClient {
 		data: StandardSchemaV1.InferInput<Payload>,
 	): Promise<EnqueuedJob>
 	/**
-	 * Enqueues a job that waits on the children `child(...)` describes, nesting to
+	 * Enqueues a job that waits on the children `childJob(...)` describes, nesting to
 	 * any depth and across queues, and gives back the id of the parent — the same
 	 * form `enqueue` gives back.
 	 *
@@ -230,7 +230,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 		},
 
 		async flow(definition, data, options) {
-			const root = await composeFlow(child(definition, data, options))
+			const root = await composeFlow(childJob(definition, data, options))
 			const enqueued = await config.driver.flow.enqueue(root)
 
 			return { id: composeJobId(definition.queue, enqueued.id) }

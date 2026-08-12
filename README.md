@@ -484,23 +484,23 @@ export const mailReport = defineJob({
 })
 ```
 
-`jobs.flow` takes the root, and `child` describes every node below it.
+`jobs.flow` takes the root, and `childJob` describes every node below it.
 
 ```ts
-import { child } from "@juicerq/jubs"
+import { childJob } from "@juicerq/jubs"
 
 const enqueued = await jobs.flow(
 	mailReport,
 	{ to: "finance@example.com" },
 	{
 		children: [
-			child(
+			childJob(
 				buildReport,
 				{ month: "2026-01" },
 				{
 					children: [
-						child(fetchRows, { source: "ledger" }),
-						child(fetchRows, { source: "invoices" }),
+						childJob(fetchRows, { source: "ledger" }),
+						childJob(fetchRows, { source: "invoices" }),
 					],
 				},
 			),
