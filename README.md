@@ -598,3 +598,22 @@ process.once("SIGINT", shutdown)
 Set `timeoutMs` below your orchestrator's grace period, not above it. Kubernetes sends `SIGKILL` 30 seconds after `SIGTERM` by default, so 25 seconds leaves the process a few seconds to close its connections and exit on its own terms. A `close` that outlives the grace period is the same as no `close` at all.
 
 `memoryDriver` runs jobs inline on the caller's stack, so nothing is in flight while `close` runs and its abort path is never reached. `timeoutMs` on a definition still works there, and so does the held key a timed-out body keeps — test a deadline against the memory driver, and test a shutdown that cuts a running handler short against `redisDriver`.
+
+## Development
+
+This section is for contributors to juibs itself, not for consumers of the library.
+
+The unit tests need nothing. The integration tests run against a real Redis, so start one locally before you run them.
+
+```sh
+cp .env.test.example .env.test
+```
+
+`.env.test` is ignored by git. It sets `REDIS_URL` to `redis://127.0.0.1:6379` — edit it if your local Redis listens on another port. `bun test` loads the file on its own, so no environment prefix is needed.
+
+```sh
+bun run test
+bun run test:integration
+```
+
+`test` runs the unit suite, `test:integration` runs the integration one. The integration tests namespace their queues and job names per run, so two runs never collide in Redis.
