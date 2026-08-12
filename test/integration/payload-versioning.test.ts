@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -11,19 +12,21 @@ const inspectorConnection = new IORedis(REDIS_URL)
 
 const opened: Queue[] = []
 
-const QUEUE = "juibs.test.version-ahead"
+const QUEUE = scoped("juibs.test.version-ahead")
+
+const JOB_NAME = scoped("contact.sync")
 
 const contactPayload = type({ email: "string" })
 
 const runningContact = defineJob({
-	name: "contact.sync",
+	name: JOB_NAME,
 	queue: QUEUE,
 	payload: contactPayload,
 	delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 10 } },
 })
 
 const aheadContact = defineJob({
-	name: "contact.sync",
+	name: JOB_NAME,
 	queue: QUEUE,
 	payload: contactPayload,
 	version: 2,

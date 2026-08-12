@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -42,8 +43,8 @@ afterAll(async () => {
 describe("uniqueness over redis", () => {
 	test("ten keepLast enqueues inside the window run once, carrying the tenth payload", async () => {
 		const rebuildIndex = defineJob({
-			name: "search.rebuild",
-			queue: "juibs.test.unique.keep-last",
+			name: scoped("search.rebuild"),
+			queue: scoped("juibs.test.unique.keep-last"),
 			payload: type({ entityId: "string", version: "number" }),
 			delivery: {
 				unique: { key: (data) => `search:${data.entityId}`, mode: "keepLast", ttlMs: 400 },
@@ -76,8 +77,8 @@ describe("uniqueness over redis", () => {
 
 	test("three noOverlap enqueues run twice, the second carrying the latest payload", async () => {
 		const syncAccount = defineJob({
-			name: "account.sync",
-			queue: "juibs.test.unique.no-overlap",
+			name: scoped("account.sync"),
+			queue: scoped("juibs.test.unique.no-overlap"),
 			payload: type({ accountId: "string", version: "number" }),
 			delivery: { unique: { key: (data) => `sync:${data.accountId}`, mode: "noOverlap" } },
 		})
@@ -117,8 +118,8 @@ describe("uniqueness over redis", () => {
 
 	test("without unique, the same payload enqueued twice becomes two jobs", async () => {
 		const sendEmail = defineJob({
-			name: "email.send",
-			queue: "juibs.test.unique.absent",
+			name: scoped("email.send"),
+			queue: scoped("juibs.test.unique.absent"),
 			payload: type({ to: "string.email" }),
 		})
 

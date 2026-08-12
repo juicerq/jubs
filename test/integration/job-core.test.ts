@@ -10,6 +10,7 @@ import {
 	type HandlerContext,
 	redisDriver,
 } from "@/index"
+import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -56,8 +57,8 @@ afterAll(async () => {
 describe("job-core over redis", () => {
 	test("a job enqueued by one client runs in a worker started by another", async () => {
 		const sendEmail = defineJob({
-			name: "email.send",
-			queue: "juibs.test.two-process",
+			name: scoped("email.send"),
+			queue: scoped("juibs.test.two-process"),
 			payload: type({ to: "string.email", subject: "string" }),
 		})
 
@@ -91,10 +92,10 @@ describe("job-core over redis", () => {
 
 		const stored = await queue.getJob(enqueued.id)
 
-		expect(stored?.name).toBe("email.send")
+		expect(stored?.name).toBe(sendEmail.name)
 		expect(stored?.data).toEqual({
 			v: 1,
-			name: "email.send",
+			name: sendEmail.name,
 			data: { to: "ada@example.com", subject: "welcome" },
 			origin: "direct",
 		})
@@ -104,8 +105,8 @@ describe("job-core over redis", () => {
 
 	test("a transforming schema stores the raw input and hands the handler the output", async () => {
 		const chargeCard = defineJob({
-			name: "billing.charge",
-			queue: "juibs.test.transform",
+			name: scoped("billing.charge"),
+			queue: scoped("juibs.test.transform"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 
@@ -129,7 +130,7 @@ describe("job-core over redis", () => {
 
 		expect(stored?.data).toEqual({
 			v: 1,
-			name: "billing.charge",
+			name: chargeCard.name,
 			data: { cents: "500" },
 			origin: "direct",
 		})
@@ -138,16 +139,16 @@ describe("job-core over redis", () => {
 	})
 
 	test("an envelope no handler owns fails on its first attempt", async () => {
-		const queueName = "juibs.test.unknown-name"
+		const queueName = scoped("juibs.test.unknown-name")
 
 		const kept = defineJob({
-			name: "email.send",
+			name: scoped("email.send"),
 			queue: queueName,
 			payload: type({ to: "string.email" }),
 		})
 
 		const retired = defineJob({
-			name: "email.retired",
+			name: scoped("email.retired"),
 			queue: queueName,
 			payload: type({ to: "string.email" }),
 		})
@@ -161,16 +162,16 @@ describe("job-core over redis", () => {
 		const finished = await waitForFinished(queue, enqueued.id)
 
 		expect(finished.attemptsMade).toBe(1)
-		expect(finished.failedReason).toContain("email.retired")
+		expect(finished.failedReason).toContain(retired.name)
 
 		await runtime.close()
 	})
 
 	test("a stored payload that no longer validates fails on its first attempt", async () => {
-		const queueName = "juibs.test.invalid-payload"
+		const queueName = scoped("juibs.test.invalid-payload")
 
 		const sendEmail = defineJob({
-			name: "email.send",
+			name: scoped("email.send"),
 			queue: queueName,
 			payload: type({ to: "string.email" }),
 		})
@@ -196,7 +197,7 @@ describe("job-core over redis", () => {
 		const finished = await waitForFinished(queue, stale.id ?? "")
 
 		expect(finished.attemptsMade).toBe(1)
-		expect(finished.failedReason).toContain("email.send")
+		expect(finished.failedReason).toContain(sendEmail.name)
 		expect(ran).toBe(false)
 
 		await runtime.close()
@@ -206,8 +207,8 @@ describe("job-core over redis", () => {
 		const retrying = new IORedis(REDIS_URL, { maxRetriesPerRequest: 20, lazyConnect: true })
 
 		const guarded = defineJob({
-			name: "email.send",
-			queue: "juibs.test.guarded",
+			name: scoped("email.send"),
+			queue: scoped("juibs.test.guarded"),
 			payload: type({ to: "string.email" }),
 		})
 

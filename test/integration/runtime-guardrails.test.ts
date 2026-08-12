@@ -10,6 +10,7 @@ import {
 	type JobFailureEvent,
 	redisDriver,
 } from "@/index"
+import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -35,8 +36,8 @@ afterAll(async () => {
 describe("runtime-guardrails over redis", () => {
 	test("reports every failed attempt, and reports the job dead once", async () => {
 		const chargeCard = defineJob({
-			name: "billing.charge",
-			queue: "juibs.test.hooks",
+			name: scoped("billing.charge"),
+			queue: scoped("juibs.test.hooks"),
 			payload: type({ cents: "number" }),
 			delivery: { attempts: 3, backoff: { type: "exponential", delayMs: 10 } },
 		})
@@ -83,7 +84,7 @@ describe("runtime-guardrails over redis", () => {
 		expect(dead[0]?.attempt).toBe(3)
 		expect(dead[0]?.id).toBe(enqueued.id)
 		expect(dead[0]?.queue).toBe(chargeCard.queue)
-		expect(dead[0]?.name).toBe("billing.charge")
+		expect(dead[0]?.name).toBe(chargeCard.name)
 		expect(dead[0]?.origin).toBe("direct")
 		expect(dead[0]?.error.message).toBe("the card was declined")
 
@@ -92,8 +93,8 @@ describe("runtime-guardrails over redis", () => {
 
 	test("holds a job with delayMs until its delay has passed", async () => {
 		const sendEmail = defineJob({
-			name: "email.send",
-			queue: "juibs.test.delay",
+			name: scoped("email.send"),
+			queue: scoped("juibs.test.delay"),
 			payload: type({ to: "string.email" }),
 			delivery: { delayMs: 700 },
 		})

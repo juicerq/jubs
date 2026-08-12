@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -37,7 +38,7 @@ async function waitForFinished(queue: Queue, id: string): Promise<Job> {
 
 function chargeCardOn(queue: string) {
 	return defineJob({
-		name: "billing.charge",
+		name: scoped("billing.charge"),
 		queue,
 		payload: type({ cents: "string.numeric.parse" }),
 		delivery: { attempts: 1 },
@@ -62,7 +63,7 @@ afterAll(async () => {
 
 describe("dead queue over redis", () => {
 	test("keeps a job that failed every attempt where no worker consumes it", async () => {
-		const chargeCard = chargeCardOn("juibs.test.dead-keep")
+		const chargeCard = chargeCardOn(scoped("juibs.test.dead-keep"))
 		const { live, dead } = await freshQueues(chargeCard.queue)
 
 		const jobs = createJobs({
@@ -83,10 +84,10 @@ describe("dead queue over redis", () => {
 		const waiting = await dead.getWaiting()
 
 		expect(waiting).toHaveLength(1)
-		expect(waiting[0]?.name).toBe("billing.charge")
+		expect(waiting[0]?.name).toBe(chargeCard.name)
 		expect(waiting[0]?.data.envelope).toEqual({
 			v: 1,
-			name: "billing.charge",
+			name: chargeCard.name,
 			data: { cents: "500" },
 			origin: "direct",
 		})
@@ -102,7 +103,7 @@ describe("dead queue over redis", () => {
 	})
 
 	test("lists a dead job and replays it with the payload it was enqueued with", async () => {
-		const chargeCard = chargeCardOn("juibs.test.dead-replay")
+		const chargeCard = chargeCardOn(scoped("juibs.test.dead-replay"))
 		const { live } = await freshQueues(chargeCard.queue)
 
 		const jobs = createJobs({
@@ -147,8 +148,8 @@ describe("dead queue over redis", () => {
 
 	test("replays a job whose uniqueness key is still taken", async () => {
 		const chargeCard = defineJob({
-			name: "billing.charge",
-			queue: "juibs.test.dead-unique",
+			name: scoped("billing.charge"),
+			queue: scoped("juibs.test.dead-unique"),
 			payload: type({ cents: "string.numeric.parse" }),
 			delivery: {
 				attempts: 1,
@@ -195,7 +196,7 @@ describe("dead queue over redis", () => {
 	})
 
 	test("discards a dead job, and refuses an id no dead job answers to", async () => {
-		const chargeCard = chargeCardOn("juibs.test.dead-discard")
+		const chargeCard = chargeCardOn(scoped("juibs.test.dead-discard"))
 		const { live, dead } = await freshQueues(chargeCard.queue)
 
 		const jobs = createJobs({

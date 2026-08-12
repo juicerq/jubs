@@ -7,6 +7,7 @@ import IORedis from "ioredis"
 import { IDEMPOTENCY_MAX_RESULT_BYTES } from "@/Idempotency"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
+import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
 
@@ -104,8 +105,8 @@ afterAll(async () => {
 describe("idempotency over redis", () => {
 	test("a delivery whose key is complete skips the handler and returns the kept result", async () => {
 		const chargeInvoice = defineJob({
-			name: "billing.charge",
-			queue: "juibs.test.idem.complete",
+			name: scoped("billing.charge"),
+			queue: scoped("juibs.test.idem.complete"),
 			payload: type({ invoiceId: "string" }),
 			idempotencyKey: (data) => data.invoiceId,
 		})
@@ -141,8 +142,8 @@ describe("idempotency over redis", () => {
 
 	test("a delivery whose lease is held is rescheduled, and spends no attempt on the wait", async () => {
 		const syncLedger = defineJob({
-			name: "ledger.sync",
-			queue: "juibs.test.idem.held",
+			name: scoped("ledger.sync"),
+			queue: scoped("juibs.test.idem.held"),
 			payload: type({ ledgerId: "string", version: "number" }),
 			idempotencyKey: (data) => data.ledgerId,
 		})
@@ -194,8 +195,8 @@ describe("idempotency over redis", () => {
 
 	test("a delivery whose lease expired runs the handler again", async () => {
 		const shipOrder = defineJob({
-			name: "orders.ship",
-			queue: "juibs.test.idem.expired",
+			name: scoped("orders.ship"),
+			queue: scoped("juibs.test.idem.expired"),
 			payload: type({ orderId: "string" }),
 			idempotencyKey: (data) => data.orderId,
 		})
@@ -230,14 +231,14 @@ describe("idempotency over redis", () => {
 
 	test("a worker killed under the handler makes the job run again, and finish exactly once", async () => {
 		const settlePayment = defineJob({
-			name: "payments.settle",
-			queue: "juibs.test.idem.crash",
+			name: scoped("payments.settle"),
+			queue: scoped("juibs.test.idem.crash"),
 			payload: type({ paymentId: "string" }),
 			idempotencyKey: (data) => data.paymentId,
 		})
 
-		const startedKey = "juibs:test:idem:crash:started"
-		const finishedKey = "juibs:test:idem:crash:finished"
+		const startedKey = scoped("juibs:test:idem:crash:started")
+		const finishedKey = scoped("juibs:test:idem:crash:finished")
 
 		const queue = inspect(settlePayment.queue)
 		await scrub(queue)
@@ -298,8 +299,8 @@ describe("idempotency over redis", () => {
 
 	test("a result above the byte limit keeps the marker alone, so the second delivery returns nothing", async () => {
 		const renderReport = defineJob({
-			name: "reports.render",
-			queue: "juibs.test.idem.oversized",
+			name: scoped("reports.render"),
+			queue: scoped("juibs.test.idem.oversized"),
 			payload: type({ reportId: "string" }),
 			idempotencyKey: (data) => data.reportId,
 		})
