@@ -1,7 +1,7 @@
 import type { Envelope } from "@/Envelope"
 import type { SerializedError } from "@/Failure"
 
-export type DeadReason = "attempts_exhausted" | "unrecoverable"
+export type DeadReason = "attempts_exhausted" | "unrecoverable" | "version_ahead"
 
 export interface DeadEntry {
 	readonly envelope: Envelope

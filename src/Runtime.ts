@@ -1,7 +1,7 @@
 import { UnrecoverableError } from "bullmq"
 import type { JobsConfig } from "@/Client"
 import { type DeadReason, deadQueueName } from "@/Dead"
-import type { JobDefinition, JobHandler } from "@/Definition"
+import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
 import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type {
 	ConsumeRequest,
@@ -11,9 +11,10 @@ import type {
 	QueueLimiter,
 	ScheduleUpsert,
 } from "@/Driver"
-import { type Envelope, PAYLOAD_VERSION, readEnvelope } from "@/Envelope"
+import { type Envelope, readEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
+import { assertVersionIsKnown, migrateEnvelope, VersionAheadError } from "@/Migration"
 import { validatePayload } from "@/Payload"
 import type { Schedule } from "@/Schedule"
 
@@ -51,6 +52,10 @@ function envelopeOf(delivery: JobDelivery): Envelope {
 }
 
 function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
+	if (error instanceof VersionAheadError) {
+		return "version_ahead"
+	}
+
 	if (error instanceof UnrecoverableError) {
 		return "unrecoverable"
 	}
@@ -153,7 +158,7 @@ async function scheduleUpsert(
 	const upsert: ScheduleUpsert = {
 		recurrence: schedule.recurrence,
 		envelope: {
-			v: PAYLOAD_VERSION,
+			v: payloadVersion(definition),
 			name: definition.name,
 			data: schedule.data,
 			origin: "schedule",
@@ -260,13 +265,17 @@ export async function startRuntime(
 			throw unrecoverable(new Error(`juibs: no handler is registered for job "${envelope.name}"`))
 		}
 
+		assertVersionIsKnown(handler.definition, envelope)
+
 		await notify(config.hooks?.onStart, "onStart", event)
 
-		const data = await validatePayload(handler.definition, envelope.data).catch(
-			(error: unknown) => {
-				throw unrecoverable(error)
-			},
-		)
+		const migrated = await migrateEnvelope(handler.definition, envelope).catch((error: unknown) => {
+			throw unrecoverable(error)
+		})
+
+		const data = await validatePayload(handler.definition, migrated).catch((error: unknown) => {
+			throw unrecoverable(error)
+		})
 
 		const result = await handler.run(data, {
 			id: delivery.id,

@@ -20,6 +20,14 @@ _Avoid_: Processor, worker function, consumer
 What is stored for a single job instance: payload version, job name and payload.
 _Avoid_: Message, record
 
+**Payload version**:
+The number that says which shape a stored payload has.
+_Avoid_: Schema version, revision
+
+**Migration**:
+The step that raises a stored payload from one version to the next.
+_Avoid_: Schema migration — the step changes a payload, never a database
+
 **Queue**:
 The named channel a job is delivered through. Many jobs share one queue.
 

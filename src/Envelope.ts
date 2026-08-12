@@ -1,7 +1,5 @@
 import type { Origin } from "@/Definition"
 
-export const PAYLOAD_VERSION = 1
-
 const ORIGINS: readonly Origin[] = ["direct", "schedule", "flow", "relay"]
 
 export interface TraceContext {

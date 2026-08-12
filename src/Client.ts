@@ -1,10 +1,10 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { type DeadJob, deadJobId, readDeadJobId } from "@/Dead"
-import type { JobDefinition, JobHandler } from "@/Definition"
+import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type { EnqueuedJob, JobDriver } from "@/Driver"
-import { PAYLOAD_VERSION } from "@/Envelope"
 import type { JobHooks } from "@/Hooks"
+import { migrateEnvelope } from "@/Migration"
 import { validatePayload } from "@/Payload"
 import { type JobsRuntime, type StartOptions, startRuntime } from "@/Runtime"
 import { assertTimezone } from "@/Schedule"
@@ -84,7 +84,8 @@ export function createJobs(config: JobsConfig): JobsClient {
 					)
 				}
 
-				const validated = await validatePayload(definition, entry.envelope.data)
+				const migrated = await migrateEnvelope(definition, entry.envelope)
+				const validated = await validatePayload(definition, migrated)
 
 				const enqueued = await config.driver.enqueue({
 					queue: definition.queue,
@@ -114,7 +115,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 			return config.driver.enqueue({
 				queue: definition.queue,
-				envelope: { v: PAYLOAD_VERSION, name: definition.name, data, origin: "direct" },
+				envelope: { v: payloadVersion(definition), name: definition.name, data, origin: "direct" },
 				delivery: resolveDelivery(definition, validated),
 			})
 		},

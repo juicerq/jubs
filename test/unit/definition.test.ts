@@ -47,6 +47,71 @@ describe("defineJob", () => {
 		expect(sweep.schedule).toEqual({ recurrence: { pattern: "0 7 * * *" }, timezone: "UTC" })
 	})
 
+	test("leaves the version and migration keys off a definition that names no version", () => {
+		expect(Object.keys(sendEmail)).not.toContain("version")
+		expect(Object.keys(sendEmail)).not.toContain("migrations")
+	})
+
+	test("carries the version and the migrations that reach it", () => {
+		const step = (data: unknown) => data
+
+		const versioned = defineJob({
+			name: "email.versioned",
+			queue: "mail",
+			payload: emailPayload,
+			version: 2,
+			migrations: { 1: step },
+		})
+
+		expect(versioned.version).toBe(2)
+		expect(versioned.migrations?.[1]).toBe(step)
+	})
+
+	test("refuses a version that is not a whole number of 1 or more", () => {
+		const refused = [0, -1, 1.5]
+
+		for (const version of refused) {
+			expect(() =>
+				defineJob({ name: "email.send", queue: "mail", payload: emailPayload, version }),
+			).toThrow("version")
+		}
+	})
+
+	test("refuses a migration from a version the definition never runs through", () => {
+		expect(() =>
+			defineJob({
+				name: "email.send",
+				queue: "mail",
+				payload: emailPayload,
+				version: 2,
+				migrations: { 2: (data) => data },
+			}),
+		).toThrow("2")
+	})
+
+	test("refuses a migration on a definition that names no version", () => {
+		expect(() =>
+			defineJob({
+				name: "email.send",
+				queue: "mail",
+				payload: emailPayload,
+				migrations: { 1: (data) => data },
+			}),
+		).toThrow("email.send")
+	})
+
+	test("takes a version whose earlier steps are missing, so a first version needs no identity step", () => {
+		const versioned = defineJob({
+			name: "email.send",
+			queue: "mail",
+			payload: emailPayload,
+			version: 3,
+			migrations: { 2: (data) => data },
+		})
+
+		expect(versioned.version).toBe(3)
+	})
+
 	test("rejects schedule data the payload schema does not accept", () => {
 		defineJob({
 			name: "email.digest",

@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
+import { DEFAULT_PAYLOAD_VERSION } from "@/Definition"
 import {
 	createJobs,
 	DELIVERY_DEFAULTS,
@@ -8,7 +9,6 @@ import {
 	defineJob,
 	every,
 	type JobDefinition,
-	PAYLOAD_VERSION,
 	type ScheduleUpsert,
 } from "@/index"
 import { recordingDriver } from "./support/RecordingDriver"
@@ -56,7 +56,7 @@ describe("start reconciles the declared schedules", () => {
 					{
 						recurrence: { everyMs: 300_000 },
 						envelope: {
-							v: PAYLOAD_VERSION,
+							v: DEFAULT_PAYLOAD_VERSION,
 							name: "session.sweep",
 							data: { olderThanDays: 30 },
 							origin: "schedule",
@@ -72,6 +72,21 @@ describe("start reconciles the declared schedules", () => {
 		const [scheduled] = await declaredBy(billDaily)
 
 		expect(scheduled?.envelope.data).toEqual({ cents: "500" })
+	})
+
+	test("declares the template on the payload version its definition names", async () => {
+		const sweepTwice = defineJob({
+			name: "session.sweep",
+			queue: "maintenance",
+			payload: type({ olderThanDays: "number" }),
+			version: 2,
+			migrations: { 1: (data) => data },
+			schedule: every("5 minutes", { data: { olderThanDays: 30 } }),
+		})
+
+		const [scheduled] = await declaredBy(sweepTwice)
+
+		expect(scheduled?.envelope.v).toBe(2)
 	})
 
 	test("a started queue that declares no schedule still reconciles, with nothing declared", async () => {
