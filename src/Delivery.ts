@@ -1,7 +1,7 @@
 import type { JobDefinition } from "@/Definition"
 
 const KEEP_LAST_WINDOW_FIX =
-	'juibs: unique mode "keepLast" needs a window — give `ttlMs` to the definition\'s `unique`, so a later enqueue has a period in which it can replace the job'
+	'jubs: unique mode "keepLast" needs a window — give `ttlMs` to the definition\'s `unique`, so a later enqueue has a period in which it can replace the job'
 
 type UniqueMode = "keepFirst" | "keepLast" | "noOverlap"
 

@@ -78,7 +78,7 @@ export class LeaseHeldError extends Error {
 
 	constructor(key: string, delayMs: number) {
 		super(
-			`juibs: the idempotency key "${key}" is held by a running delivery — this delivery waits ${delayMs}ms and is delivered again`,
+			`jubs: the idempotency key "${key}" is held by a running delivery — this delivery waits ${delayMs}ms and is delivered again`,
 		)
 		this.name = "LeaseHeldError"
 		this.delayMs = delayMs
@@ -119,7 +119,7 @@ function renewWhileRunning(store: IdempotencyStore, request: RenewRequest): () =
 	const renewing = setInterval(() => {
 		store.renew(request).catch((error: unknown) => {
 			console.error(
-				`juibs: the idempotency lease of "${request.key}" could not be renewed; the job may run again`,
+				`jubs: the idempotency lease of "${request.key}" could not be renewed; the job may run again`,
 				error,
 			)
 		})
@@ -148,7 +148,7 @@ function settleWhenBodyEnds(
 		)
 		.catch((error: unknown) => {
 			console.error(
-				`juibs: the idempotency lease of "${held.key}" outlived its delivery and could not be settled; the key stays held until it expires`,
+				`jubs: the idempotency lease of "${held.key}" outlived its delivery and could not be settled; the key stays held until it expires`,
 				error,
 			)
 		})

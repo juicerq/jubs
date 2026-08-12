@@ -1,1 +1,1 @@
-export const JuibsDashboard: Record<string, never> = {}
+export const JubsDashboard: Record<string, never> = {}

@@ -80,7 +80,7 @@ await jobs.start([
 ])
 `
 
-	const path = join(tmpdir(), `juibs-idem-crash-worker-${Bun.randomUUIDv7()}.mjs`)
+	const path = join(tmpdir(), `jubs-idem-crash-worker-${Bun.randomUUIDv7()}.mjs`)
 
 	await Bun.write(path, source)
 
@@ -106,7 +106,7 @@ describe("idempotency over redis", () => {
 	test("a delivery whose key is complete skips the handler and returns the kept result", async () => {
 		const chargeInvoice = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.idem.complete"),
+			queue: scoped("jubs.test.idem.complete"),
 			payload: type({ invoiceId: "string" }),
 			idempotencyKey: (data) => data.invoiceId,
 		})
@@ -143,7 +143,7 @@ describe("idempotency over redis", () => {
 	test("a delivery whose lease is held is rescheduled, and spends no attempt on the wait", async () => {
 		const syncLedger = defineJob({
 			name: scoped("ledger.sync"),
-			queue: scoped("juibs.test.idem.held"),
+			queue: scoped("jubs.test.idem.held"),
 			payload: type({ ledgerId: "string", version: "number" }),
 			idempotencyKey: (data) => data.ledgerId,
 		})
@@ -200,7 +200,7 @@ describe("idempotency over redis", () => {
 	test("a delivery whose lease expired runs the handler again", async () => {
 		const shipOrder = defineJob({
 			name: scoped("orders.ship"),
-			queue: scoped("juibs.test.idem.expired"),
+			queue: scoped("jubs.test.idem.expired"),
 			payload: type({ orderId: "string" }),
 			idempotencyKey: (data) => data.orderId,
 		})
@@ -238,13 +238,13 @@ describe("idempotency over redis", () => {
 	test("a worker killed under the handler makes the job run again, and finish exactly once", async () => {
 		const settlePayment = defineJob({
 			name: scoped("payments.settle"),
-			queue: scoped("juibs.test.idem.crash"),
+			queue: scoped("jubs.test.idem.crash"),
 			payload: type({ paymentId: "string" }),
 			idempotencyKey: (data) => data.paymentId,
 		})
 
-		const startedKey = scoped("juibs:test:idem:crash:started")
-		const finishedKey = scoped("juibs:test:idem:crash:finished")
+		const startedKey = scoped("jubs:test:idem:crash:started")
+		const finishedKey = scoped("jubs:test:idem:crash:finished")
 
 		const queue = inspect(settlePayment.queue)
 		await scrub(queue)
@@ -308,7 +308,7 @@ describe("idempotency over redis", () => {
 	test("a result above the byte limit keeps the marker alone, so the second delivery returns nothing", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),
-			queue: scoped("juibs.test.idem.oversized"),
+			queue: scoped("jubs.test.idem.oversized"),
 			payload: type({ reportId: "string" }),
 			idempotencyKey: (data) => data.reportId,
 		})

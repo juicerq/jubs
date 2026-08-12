@@ -80,7 +80,7 @@ function readDeadJobId(id: string): { queue: string; storedId: string } {
 
 	if (live === undefined) {
 		throw new Error(
-			`juibs: "${id}" is not a dead job id — pass an id returned by jobs.dead.list(queue)`,
+			`jubs: "${id}" is not a dead job id — pass an id returned by jobs.dead.list(queue)`,
 		)
 	}
 
@@ -122,7 +122,7 @@ function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
 	const names = [...used].map((queue) => `"${queue}"`).join(", ")
 
 	throw new Error(
-		`juibs: createJobs was given the dead queue "${stray}", which no registered definition uses — the queues its definitions use are ${names}`,
+		`jubs: createJobs was given the dead queue "${stray}", which no registered definition uses — the queues its definitions use are ${names}`,
 	)
 }
 
@@ -150,7 +150,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 				if (!entry) {
 					throw new Error(
-						`juibs: no dead job "${id}" is kept — it was replayed or discarded already`,
+						`jubs: no dead job "${id}" is kept — it was replayed or discarded already`,
 					)
 				}
 
@@ -160,7 +160,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 				if (!definition) {
 					throw new Error(
-						`juibs: the dead job "${id}" runs "${entry.envelope.name}", which this client does not know — register its definition in createJobs({ definitions }) to replay it`,
+						`jubs: the dead job "${id}" runs "${entry.envelope.name}", which this client does not know — register its definition in createJobs({ definitions }) to replay it`,
 					)
 				}
 
@@ -186,7 +186,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 					return
 				}
 
-				throw new Error(`juibs: no dead job "${id}" is kept — it was replayed or discarded already`)
+				throw new Error(`jubs: no dead job "${id}" is kept — it was replayed or discarded already`)
 			},
 		},
 

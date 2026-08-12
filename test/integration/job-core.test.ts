@@ -58,7 +58,7 @@ describe("job-core over redis", () => {
 	test("a job enqueued by one client runs in a worker started by another", async () => {
 		const sendEmail = defineJob({
 			name: scoped("email.send"),
-			queue: scoped("juibs.test.two-process"),
+			queue: scoped("jubs.test.two-process"),
 			payload: type({ to: "string.email", subject: "string" }),
 		})
 
@@ -107,7 +107,7 @@ describe("job-core over redis", () => {
 	test("a transforming schema stores the raw input and hands the handler the output", async () => {
 		const chargeCard = defineJob({
 			name: scoped("billing.charge"),
-			queue: scoped("juibs.test.transform"),
+			queue: scoped("jubs.test.transform"),
 			payload: type({ cents: "string.numeric.parse" }),
 		})
 
@@ -140,7 +140,7 @@ describe("job-core over redis", () => {
 	})
 
 	test("an envelope no handler owns fails on its first attempt", async () => {
-		const queueName = scoped("juibs.test.unknown-name")
+		const queueName = scoped("jubs.test.unknown-name")
 
 		const kept = defineJob({
 			name: scoped("email.send"),
@@ -169,7 +169,7 @@ describe("job-core over redis", () => {
 	})
 
 	test("a stored payload that no longer validates fails on its first attempt", async () => {
-		const queueName = scoped("juibs.test.invalid-payload")
+		const queueName = scoped("jubs.test.invalid-payload")
 
 		const sendEmail = defineJob({
 			name: scoped("email.send"),
@@ -209,7 +209,7 @@ describe("job-core over redis", () => {
 
 		const guarded = defineJob({
 			name: scoped("email.send"),
-			queue: scoped("juibs.test.guarded"),
+			queue: scoped("jubs.test.guarded"),
 			payload: type({ to: "string.email" }),
 		})
 

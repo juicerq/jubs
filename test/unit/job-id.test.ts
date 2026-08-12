@@ -7,7 +7,7 @@ describe("job ids", () => {
 	})
 
 	test("keeps a stored id that holds colons, as a scheduled job's does", () => {
-		const scheduled = "repeat:juibs.reports.digest:1712345678000"
+		const scheduled = "repeat:jubs.reports.digest:1712345678000"
 
 		expect(readJobId(composeJobId("emails", scheduled))).toEqual({
 			queue: "emails",

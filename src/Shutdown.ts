@@ -1,7 +1,7 @@
 export const SHUTDOWN_REDELIVERY_MS = 1_000
 
 /**
- * The reason juibs aborts a handler's signal when `close({ timeoutMs })` runs
+ * The reason jubs aborts a handler's signal when `close({ timeoutMs })` runs
  * out of patience, and the error the delivery then fails with.
  *
  * It is not a job failure. A driver that can put a delivery back reschedules it
@@ -25,7 +25,7 @@ export class ShutdownAbortError extends Error {
 
 	constructor(name: string, running?: Promise<unknown>) {
 		super(
-			`juibs: the job "${name}" was still running when close() ran out of time — this delivery waits ${SHUTDOWN_REDELIVERY_MS}ms, is delivered again and spends no attempt`,
+			`jubs: the job "${name}" was still running when close() ran out of time — this delivery waits ${SHUTDOWN_REDELIVERY_MS}ms, is delivered again and spends no attempt`,
 		)
 		this.name = "ShutdownAbortError"
 		this.delayMs = SHUTDOWN_REDELIVERY_MS

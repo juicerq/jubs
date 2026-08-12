@@ -40,7 +40,7 @@ export async function notify<Event extends JobEvent>(
 		await hook(event)
 	} catch (error) {
 		console.error(
-			`juibs: the ${name} hook threw for job "${event.name}"; the job outcome is unchanged`,
+			`jubs: the ${name} hook threw for job "${event.name}"; the job outcome is unchanged`,
 			error,
 		)
 	}

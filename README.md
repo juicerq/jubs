@@ -1,14 +1,14 @@
-# @juicerq/juibs
+# @juicerq/jubs
 
-A typed job library over BullMQ. BullMQ is a good queue and a poor contract: a job is a string name plus untyped `data`, so every team rebuilds payload validation, a name-to-handler lookup, and a delivery policy that lives at the call site instead of with the job. juibs gives a job a name, a payload schema, a delivery policy and a place to run, so producers and consumers never share code. You declare a definition once and get a typed enqueue, a typed handler, validation on both sides, and correct behaviour for the expensive failure modes — an enqueue inside a database transaction that rolls back, a schedule deleted from the code but still firing in Redis, a job that runs twice after a pod restart, an envelope a rolling deploy cannot parse.
+A typed job library over BullMQ. BullMQ is a good queue and a poor contract: a job is a string name plus untyped `data`, so every team rebuilds payload validation, a name-to-handler lookup, and a delivery policy that lives at the call site instead of with the job. jubs gives a job a name, a payload schema, a delivery policy and a place to run, so producers and consumers never share code. You declare a definition once and get a typed enqueue, a typed handler, validation on both sides, and correct behaviour for the expensive failure modes — an enqueue inside a database transaction that rolls back, a schedule deleted from the code but still firing in Redis, a job that runs twice after a pod restart, an envelope a rolling deploy cannot parse.
 
 ## Install
 
 ```sh
-bun add @juicerq/juibs bullmq
+bun add @juicerq/jubs bullmq
 ```
 
-You also need a Redis client. juibs does not depend on one — you create the connection, and you close it.
+You also need a Redis client. jubs does not depend on one — you create the connection, and you close it.
 
 ```sh
 bun add ioredis
@@ -22,7 +22,7 @@ A definition is the producer-side description of a job: its name, its queue and 
 
 ```ts
 // jobs/definitions.ts
-import { defineJob } from "@juicerq/juibs"
+import { defineJob } from "@juicerq/jubs"
 import { type } from "arktype"
 
 export const sendWelcomeEmail = defineJob({
@@ -40,7 +40,7 @@ The second argument is the handler context: `id` is the job id, `attempt` is 1-b
 
 ```ts
 // jobs/handlers.ts
-import { defineHandler } from "@juicerq/juibs"
+import { defineHandler } from "@juicerq/jubs"
 import { sendWelcomeEmail } from "./definitions"
 
 export const welcomeEmailHandler = defineHandler(sendWelcomeEmail, async (data, context) => {
@@ -63,11 +63,11 @@ export const renderInvoice = defineJob({
 })
 ```
 
-The handler's return type is inferred from it. A definition that declares no `result` returns `unknown`, and juibs validates nothing at all.
+The handler's return type is inferred from it. A definition that declares no `result` returns `unknown`, and jubs validates nothing at all.
 
-The value is validated the moment the handler resolves, before anything is stored. juibs keeps what the schema gives back, never what the handler returned. The handler therefore returns the schema's **input**: a schema that transforms cannot validate its own output, which is the same rule `payload` follows.
+The value is validated the moment the handler resolves, before anything is stored. jubs keeps what the schema gives back, never what the handler returned. The handler therefore returns the schema's **input**: a schema that transforms cannot validate its own output, which is the same rule `payload` follows.
 
-The validated value is what the handler's return value becomes. No client method reads it back — `jobs.get` answers with the job's state, not with its result. Underneath it is BullMQ's own `returnvalue`, which juibs does not surface. The one place it comes back to you is a repeated delivery under an [idempotency key](#idempotency): the key replays the validated value, as the JSON projection of it, so a `Date` the schema produced comes back a string. The size limit described there applies to it.
+The validated value is what the handler's return value becomes. No client method reads it back — `jobs.get` answers with the job's state, not with its result. Underneath it is BullMQ's own `returnvalue`, which jubs does not surface. The one place it comes back to you is a repeated delivery under an [idempotency key](#idempotency): the key replays the validated value, as the JSON projection of it, so a `Date` the schema produced comes back a string. The size limit described there applies to it.
 
 A return value the schema rejects fails the attempt unrecoverably: it burns one attempt and is not retried, exactly as an invalid stored payload does. The failure is yours to fix in code, and five more attempts would only produce it again.
 
@@ -81,7 +81,7 @@ Both processes build a client with `createJobs({ driver })`. `redisDriver` takes
 
 ```ts
 // web.ts
-import { createJobs, redisDriver } from "@juicerq/juibs"
+import { createJobs, redisDriver } from "@juicerq/jubs"
 import Redis from "ioredis"
 import { sendWelcomeEmail } from "./jobs/definitions"
 
@@ -99,7 +99,7 @@ A worker connection must be created with `maxRetriesPerRequest: null`, because B
 
 ```ts
 // worker.ts
-import { createJobs, redisDriver } from "@juicerq/juibs"
+import { createJobs, redisDriver } from "@juicerq/jubs"
 import Redis from "ioredis"
 import { welcomeEmailHandler } from "./jobs/handlers"
 
@@ -114,19 +114,19 @@ process.on("SIGTERM", async () => {
 })
 ```
 
-juibs installs no signal handler of its own. Shutdown is yours, and it is two steps: close the runtime, then close the connection you created. The runtime owns the workers it opened — including the separate blocking connection each worker duplicates for itself — and nothing else. juibs never closes a client you passed in.
+jubs installs no signal handler of its own. Shutdown is yours, and it is two steps: close the runtime, then close the connection you created. The runtime owns the workers it opened — including the separate blocking connection each worker duplicates for itself — and nothing else. jubs never closes a client you passed in.
 
 A process that only enqueues has nothing to close. Its queue handles hold no socket of their own, so quitting your connection is enough.
 
 ## Testing
 
-`@juicerq/juibs/testing` exports `memoryDriver()`. It satisfies the same driver interface as `redisDriver`, so a test builds its client the same way the worker does — with the real payload validation and the real name-to-handler dispatch, in milliseconds, with no Redis.
+`@juicerq/jubs/testing` exports `memoryDriver()`. It satisfies the same driver interface as `redisDriver`, so a test builds its client the same way the worker does — with the real payload validation and the real name-to-handler dispatch, in milliseconds, with no Redis.
 
 `enqueue` only records. Nothing runs until you ask: `drain()` runs every pending job and returns how many ran, `runNext()` runs the oldest one, and `enqueued(definition)` returns the payloads enqueued for that definition, exactly as they were passed in.
 
 ```ts
-import { createJobs, defineHandler } from "@juicerq/juibs"
-import { memoryDriver } from "@juicerq/juibs/testing"
+import { createJobs, defineHandler } from "@juicerq/jubs"
+import { memoryDriver } from "@juicerq/jubs/testing"
 import { expect, test } from "bun:test"
 import { sendWelcomeEmail } from "./jobs/definitions"
 
@@ -190,7 +190,7 @@ A deploy is never atomic. Some jobs in Redis were written by the deploy before, 
 
 **Backwards: an old envelope on a new worker.** This is what `migrations` is for. Raise `version` by one and add the step that goes from the old version to the new one. Deploy it. Every job still in Redis runs through the step and works.
 
-**Forwards: a new envelope on an old worker.** The old worker cannot read a shape it has never heard of, and guessing would corrupt data. juibs refuses instead: an envelope whose `v` is greater than the running `version` is **never** interpreted. It fails unrecoverably, burns one attempt, is not retried, and — if the queue is in `deadQueues` — is kept in the dead queue with the reason `version_ahead`. It never fires `onStart` — a job held by a future version never started. Once the new workers are up, replay it.
+**Forwards: a new envelope on an old worker.** The old worker cannot read a shape it has never heard of, and guessing would corrupt data. jubs refuses instead: an envelope whose `v` is greater than the running `version` is **never** interpreted. It fails unrecoverably, burns one attempt, is not retried, and — if the queue is in `deadQueues` — is kept in the dead queue with the reason `version_ahead`. It never fires `onStart` — a job held by a future version never started. Once the new workers are up, replay it.
 
 The safe rollout is two deploys: workers first, producers second. Deploy the new version to the workers while producers still write the old one — the new workers migrate what the old producers write. Then deploy the producers. Nothing is ever `version_ahead` in that order.
 
@@ -215,7 +215,7 @@ Two handlers sharing a job name is the first. Only one of them could ever run, a
 A definition registered on a started queue with no handler is the second. Register your definitions to get it:
 
 ```ts
-import { createJobs, redisDriver } from "@juicerq/juibs"
+import { createJobs, redisDriver } from "@juicerq/jubs"
 import * as definitions from "./jobs/definitions"
 
 const jobs = createJobs({
@@ -320,7 +320,7 @@ export const syncAccount = defineJob({
 })
 ```
 
-`noOverlap` ignores `ttlMs`, so juibs drops it: the key lives exactly as long as the job it guards. At most two jobs per key exist at any moment — one running, one waiting.
+`noOverlap` ignores `ttlMs`, so jubs drops it: the key lives exactly as long as the job it guards. At most two jobs per key exist at any moment — one running, one waiting.
 
 The memory driver throws on `unique`. Uniqueness is decided inside Redis, atomically and on a clock; an inline imitation would agree with your test and disagree with production. Test it against `redisDriver`.
 
@@ -355,9 +355,9 @@ Three values are fixed today and configurable by nothing: the lease is **30 seco
 
 A kept result is stored as JSON, so a repeated delivery gets the JSON projection of it: a `Date` comes back a string, and anything JSON drops is dropped.
 
-It also has a size limit of **64 KB**. Above it, juibs keeps the completion marker alone: the key still counts as complete, the handler is still skipped, but the repeated delivery gets `undefined` instead of the result. Return a receipt id, not the receipt.
+It also has a size limit of **64 KB**. Above it, jubs keeps the completion marker alone: the key still counts as complete, the handler is still skipped, but the repeated delivery gets `undefined` instead of the result. Return a receipt id, not the receipt.
 
-A result JSON cannot serialise at all — a circular object, a `BigInt` — leaves a state juibs cannot repair. juibs keeps the completion marker alone, as above, and reports the job a success: `onSuccess` fires. BullMQ then throws while writing the return value, outside juibs' reach and after the dispatch has returned, so the attempt is failed from under it. The delivery arrives again, meets the complete key, skips the handler and replays the empty marker — which serialises — so the job settles `completed` while still carrying the `failedReason` of the attempt that threw. `onAttemptFailed` and `onDead` never fire, and nothing is buried. On a definition with no key the handler runs again on every attempt and the job ends `failed`. Nothing warns you either way, so return a value JSON can hold.
+A result JSON cannot serialise at all — a circular object, a `BigInt` — leaves a state jubs cannot repair. jubs keeps the completion marker alone, as above, and reports the job a success: `onSuccess` fires. BullMQ then throws while writing the return value, outside jubs' reach and after the dispatch has returned, so the attempt is failed from under it. The delivery arrives again, meets the complete key, skips the handler and replays the empty marker — which serialises — so the job settles `completed` while still carrying the `failedReason` of the attempt that threw. `onAttemptFailed` and `onDead` never fire, and nothing is buried. On a definition with no key the handler runs again on every attempt and the job ends `failed`. Nothing warns you either way, so return a value JSON can hold.
 
 The lease is what makes this correct, and the reason is worth spelling out. Marking the key before running and skipping it on the repeat would be at-most-once, not idempotent: a worker killed between the mark and the end would leave a key that says done over work that never happened, and every later delivery would report success for a charge nobody made. The lease says *in progress*, not *done*, and it expires — so a killed worker gives the job back instead of losing it.
 
@@ -377,7 +377,7 @@ A schedule is the recurrence rule that makes a job run on its own, without a pro
 
 ```ts
 // jobs/definitions.ts
-import { dailyAt, defineJob } from "@juicerq/juibs"
+import { dailyAt, defineJob } from "@juicerq/jubs"
 import { type } from "arktype"
 
 export const sendDigest = defineJob({
@@ -425,9 +425,9 @@ export const closeBooks = defineJob({
 })
 ```
 
-`every` takes no time zone, in the type and at runtime. The zone only enters the calculation when the recurrence is a cron pattern. On an interval recurrence BullMQ never calls the cron parser, so a wrong zone there would throw nothing at all and be stored in silence. juibs refuses it instead of keeping a value that does nothing.
+`every` takes no time zone, in the type and at runtime. The zone only enters the calculation when the recurrence is a cron pattern. On an interval recurrence BullMQ never calls the cron parser, so a wrong zone there would throw nothing at all and be stored in silence. jubs refuses it instead of keeping a value that does nothing.
 
-`start` upserts every declared schedule and **removes** the ones this library created that the code no longer declares. That removal is the point. BullMQ's `upsertJobScheduler` never removes anything on its own, so a schedule you delete from the code keeps firing in Redis until a human goes looking for it. Reconciliation touches **only** scheduler names that start with `juibs.`. The prefix is the whole test — juibs keeps no record of what it created, so any undeclared scheduler carrying that prefix is removed, whoever wrote it. A scheduler another tool created survives as long as its name does not start with `juibs.`.
+`start` upserts every declared schedule and **removes** the ones this library created that the code no longer declares. That removal is the point. BullMQ's `upsertJobScheduler` never removes anything on its own, so a schedule you delete from the code keeps firing in Redis until a human goes looking for it. Reconciliation touches **only** scheduler names that start with `jubs.`. The prefix is the whole test — jubs keeps no record of what it created, so any undeclared scheduler carrying that prefix is removed, whoever wrote it. A scheduler another tool created survives as long as its name does not start with `jubs.`.
 
 Two limits are worth saying out loud, because either one destroys state when you do not know it.
 
@@ -449,9 +449,9 @@ export const digestHandler = defineHandler(sendDigest, async (data, context) => 
 })
 ```
 
-The occurrence the scheduler produces does **not** carry `unique`. BullMQ writes the deduplication option onto the scheduler's template and then ignores it — no key is ever taken — so juibs drops it rather than promise what the layer below does not keep. The recurrence still gives every occurrence its own identity: BullMQ produces one job per occurrence, with a deterministic id. That is identity, not exclusion. `unique` keeps working normally when the same definition is enqueued by hand. An occurrence that must run exactly once needs `idempotencyKey` instead — see [Idempotency](#idempotency).
+The occurrence the scheduler produces does **not** carry `unique`. BullMQ writes the deduplication option onto the scheduler's template and then ignores it — no key is ever taken — so jubs drops it rather than promise what the layer below does not keep. The recurrence still gives every occurrence its own identity: BullMQ produces one job per occurrence, with a deterministic id. That is identity, not exclusion. `unique` keeps working normally when the same definition is enqueued by hand. An occurrence that must run exactly once needs `idempotencyKey` instead — see [Idempotency](#idempotency).
 
-**An occurrence that takes longer than the interval overlaps the next one.** The scheduler produces the next occurrence by the clock, without looking at whether the previous one finished: a 3 second handler on `every("1 second")` reaches four runs at the same time. juibs does not prevent it, and `noOverlap` cannot help — it is the very option the scheduler's template drops. The defence is yours: an interval longer than the worst duration, or a lock inside the handler.
+**An occurrence that takes longer than the interval overlaps the next one.** The scheduler produces the next occurrence by the clock, without looking at whether the previous one finished: a 3 second handler on `every("1 second")` reaches four runs at the same time. jubs does not prevent it, and `noOverlap` cannot help — it is the very option the scheduler's template drops. The defence is yours: an interval longer than the worst duration, or a lock inside the handler.
 
 A scheduled definition with `delayMs` in its delivery makes `start` throw. A delay postpones one enqueue, and a recurrence has no single enqueue to postpone.
 
@@ -477,9 +477,9 @@ Every event carries `name`, `queue`, `id`, `attempt` and `origin`. `onAttemptFai
 
 The two failure hooks answer different questions. `onAttemptFailed` fires on **every** failed attempt, so five attempts fire it five times; it is your noise-tolerant log line. `onDead` fires **once**, only when the job gives up — the last attempt failed, the handler threw BullMQ's `UnrecoverableError`, or the job was cancelled while it ran. That is the one worth paging on. `onDead` fires whether or not a dead queue is configured.
 
-A job that never becomes an execution fires nothing: a stored value that is not a juibs envelope has no job name to report. A job whose name no handler owns is the other way round — the envelope names it, so it fires `onAttemptFailed` and `onDead` without ever firing `onStart`.
+A job that never becomes an execution fires nothing: a stored value that is not a jubs envelope has no job name to report. A job whose name no handler owns is the other way round — the envelope names it, so it fires `onAttemptFailed` and `onDead` without ever firing `onStart`.
 
-A hook that throws never changes the job's outcome. juibs reports it on `console.error` and carries on: a broken metrics client must not fail a job that worked. Hooks are awaited, so an async hook finishes before the execution ends.
+A hook that throws never changes the job's outcome. jubs reports it on `console.error` and carries on: a broken metrics client must not fail a job that worked. Hooks are awaited, so an async hook finishes before the execution ends.
 
 ## Dead queue
 
@@ -529,7 +529,7 @@ Replay and discard are at-least-once, like every delivery here. Two operators ac
 
 A replay can also run nothing at all, and still report success. It happens to a job whose definition has both `timeoutMs` and `idempotencyKey`. The attempt and the body are judged apart: the attempt failed on its deadline and the job was buried as `attempts_exhausted`, while the detached body kept running and, when it returned, completed that job's idempotency key with its result. A complete key keeps its result for **24 hours**. A replay inside that window meets the complete key, hands the kept result straight back and never calls the handler. Nothing runs, and the replay looks green. So before you trust such a replay, read the effects the handler was supposed to leave — a green replay is not proof it ran. After the 24 hours the key is gone and the next replay runs for real.
 
-Writing to the dead queue never changes a job's outcome. If Redis refuses the write, juibs reports it on `console.error` and the job still fails the way it would have.
+Writing to the dead queue never changes a job's outcome. If Redis refuses the write, jubs reports it on `console.error` and the job still fails the way it would have.
 
 `onDead` is separate, and fires whether or not a dead queue is configured. The hook is the page; the dead queue is the copy you replay from.
 
@@ -567,7 +567,7 @@ export const renderReport = defineJob({
 })
 ```
 
-On expiry juibs aborts `context.signal` and fails the attempt at once. It does not wait for the handler. That is the honest limit: nothing can kill a running function in Node, so a handler that ignores its signal keeps running, **detached**, until it returns — and its return goes nowhere, because the attempt has already failed. `timeoutMs` is a deadline on the attempt, not a kill.
+On expiry jubs aborts `context.signal` and fails the attempt at once. It does not wait for the handler. That is the honest limit: nothing can kill a running function in Node, so a handler that ignores its signal keeps running, **detached**, until it returns — and its return goes nowhere, because the attempt has already failed. `timeoutMs` is a deadline on the attempt, not a kill.
 
 A detached body is outside every budget. The moment the attempt fails, BullMQ frees the concurrency slot and starts the next job, while the body runs on **outside** `concurrency`. So with a dependency that hangs, the bodies in flight grow without a ceiling above the number you configured, and the retry of the same job can enter the handler while the previous body is still executing. Without an `idempotencyKey`, a handler that ignores its signal has to tolerate running twice at once.
 
@@ -585,11 +585,11 @@ export const renderReportHandler = defineHandler(renderReport, async (data, cont
 
 `fetch`, `setTimeout`, most database clients and every `AbortSignal`-aware library take one.
 
-**A handler that sees its signal abort must throw.** A handler that returns normally after an abort is recorded as a success, and juibs has no way to know the work stopped half done. A return is still a success for the handler that finished just before the abort — that one is right to return. `signal.reason` tells the two aborts apart: a shutdown aborts with a `ShutdownAbortError`, which juibs exports, and a deadline aborts with an error whose message names the `timeoutMs` it ran past.
+**A handler that sees its signal abort must throw.** A handler that returns normally after an abort is recorded as a success, and jubs has no way to know the work stopped half done. A return is still a success for the handler that finished just before the abort — that one is right to return. `signal.reason` tells the two aborts apart: a shutdown aborts with a `ShutdownAbortError`, which jubs exports, and a deadline aborts with an error whose message names the `timeoutMs` it ran past.
 
 ### `timeoutMs` with `idempotencyKey`
 
-When a definition has both, the idempotency key follows the **body**, not the attempt. The key stays held, and juibs keeps renewing its lease, for as long as the detached body runs.
+When a definition has both, the idempotency key follows the **body**, not the attempt. The key stays held, and jubs keeps renewing its lease, for as long as the detached body runs.
 
 That is what stops the second body. Every delivery of the same key while the body lives meets a held lease, so it is rescheduled without spending an attempt — the same path a concurrent delivery already takes. When the body finally returns, the key becomes complete with its result, and the next delivery replays that result instead of doing the work again. When the body throws, the key is released and the next delivery runs it for real.
 
@@ -605,11 +605,11 @@ One thing the pair does not reconcile is a job that dies while its body lives. T
 
 `runtime.close({ timeoutMs })` puts a ceiling on that wait. It resolves as soon as the in-flight jobs drain, and if the timeout expires first it aborts the signal of every job still running and resolves anyway.
 
-A shutdown abort costs the job nothing. When the handler throws, juibs does not treat it as a failed attempt: no `onAttemptFailed`, no dead queue, no `onDead`. The delivery is put back with `moveToDelayed`, which spends no attempt, and another worker takes it. A handler punished for obeying its signal would be the wrong lesson to teach.
+A shutdown abort costs the job nothing. When the handler throws, jubs does not treat it as a failed attempt: no `onAttemptFailed`, no dead queue, no `onDead`. The delivery is put back with `moveToDelayed`, which spends no attempt, and another worker takes it. A handler punished for obeying its signal would be the wrong lesson to teach.
 
 A handler that ignores its signal is the worse case, not the better one. `close` still resolves inside the window, but the job it holds stays active in Redis, and it is recovered only as stalled — once, since `maxStalledCount` defaults to 1. If the process dies before `moveToDelayed` reaches Redis, a cooperative job takes that same stalled path. That is acceptable, and better than burying a job that never failed.
 
-**juibs installs no `SIGTERM` or `SIGINT` handler.** A library that grabbed those would fight your HTTP server, your database pool and your tracer for the same signal. Your process owns its shutdown; juibs gives it a `close` to call. The recommended shape for a worker process:
+**jubs installs no `SIGTERM` or `SIGINT` handler.** A library that grabbed those would fight your HTTP server, your database pool and your tracer for the same signal. Your process owns its shutdown; jubs gives it a `close` to call. The recommended shape for a worker process:
 
 ```ts
 const runtime = await jobs.start(handlers)
@@ -677,7 +677,7 @@ if (!snapshot) {
 console.log(snapshot.state, snapshot.attempts, snapshot.maxAttempts, snapshot.failure)
 ```
 
-`state` is one of `waiting`, `active`, `delayed`, `completed`, `failed`, `waiting_children` or `unknown`. `envelope` is `undefined` when what is stored is not a juibs envelope — a job another producer put on the same queue.
+`state` is one of `waiting`, `active`, `delayed`, `completed`, `failed`, `waiting_children` or `unknown`. `envelope` is `undefined` when what is stored is not a jubs envelope — a job another producer put on the same queue.
 
 `attempts` is a **count of the attempts that have ended**, not the one under way. A job that never ran reads `0`, and a job running its second attempt reads `1`, because the attempt in flight has not ended. It is not `context.attempt`, which is 1-based and names the attempt the handler is running — the same job reads `1` here and `2` there at the same moment.
 
@@ -704,9 +704,9 @@ What a cancellation does depends on whether the job has started.
 
 `removed` says the job is gone, not that it never ran. The state is read and the job is deleted in two steps, so a job that was waiting when it was read and started and finished before the deletion landed is deleted all the same, and the work it did stands. The window is narrow and it is left open on purpose: closing it would cost a lock on every cancellation to buy nothing, because whoever cancels a job racing its own start cannot know which of the two won anyway. The dead queue is declared at-least-once for the same reason.
 
-A job that waits on children is removed with those children. They exist to feed the job you cancelled, and would otherwise finish into a parent that is gone. Nothing in juibs builds a flow today, so this is the rule waiting for `flow`, not one you can meet yet.
+A job that waits on children is removed with those children. They exist to feed the job you cancelled, and would otherwise finish into a parent that is gone. Nothing in jubs builds a flow today, so this is the rule waiting for `flow`, not one you can meet yet.
 
-**A job that is already running cannot be removed.** BullMQ refuses to remove a job a worker holds the lock on, and juibs does not pretend otherwise. What happens instead is an abort: juibs marks the job, the runtime that holds the delivery aborts `context.signal`, and the handler ends the work itself. The result is `aborting` — the abort was asked for, not that the job has stopped.
+**A job that is already running cannot be removed.** BullMQ refuses to remove a job a worker holds the lock on, and jubs does not pretend otherwise. What happens instead is an abort: jubs marks the job, the runtime that holds the delivery aborts `context.signal`, and the handler ends the work itself. The result is `aborting` — the abort was asked for, not that the job has stopped.
 
 ```ts
 const cancelled = await jobs.cancel(id)
@@ -734,7 +734,7 @@ export const renderReportHandler = defineHandler(renderReport, async (data, cont
 })
 ```
 
-A cancelled job dies with its own reason. The attempt fails, `onAttemptFailed` and `onDead` both fire, **no further attempt is spent** whatever `attempts` says, and — if the queue is in `deadQueues` — the entry is kept with the reason `cancelled` — see [Dead queue](#dead-queue). The error is a `CancelledError`, which juibs exports. So a job you cancelled by mistake is still there to replay.
+A cancelled job dies with its own reason. The attempt fails, `onAttemptFailed` and `onDead` both fire, **no further attempt is spent** whatever `attempts` says, and — if the queue is in `deadQueues` — the entry is kept with the reason `cancelled` — see [Dead queue](#dead-queue). The error is a `CancelledError`, which jubs exports. So a job you cancelled by mistake is still there to replay.
 
 A cancellation that arrives after the job settled comes back as `finished`, with the state it settled in. It changes nothing.
 
@@ -777,7 +777,7 @@ A pause stops **fetching**, not the jobs already fetched: what is active when yo
 
 ### What these operations do not reach
 
-**Clearing a queue does not clear the idempotency keys.** Keys live under `juibs:idem:`, outside the `bull:<queue>:` namespace, so a `queue.obliterate()`, a purge from a Bull Board, a redeploy and a restart all leave them exactly where they were, for the 24 hours a complete key keeps its result. A job you enqueue again right after the purge can meet its own complete key, skip the handler in silence and hand back the result kept from the run before. There is no API to delete one today. Until there is, the way out is to wait the retention out, or to delete the key in Redis by hand.
+**Clearing a queue does not clear the idempotency keys.** Keys live under `jubs:idem:`, outside the `bull:<queue>:` namespace, so a `queue.obliterate()`, a purge from a Bull Board, a redeploy and a restart all leave them exactly where they were, for the 24 hours a complete key keeps its result. A job you enqueue again right after the purge can meet its own complete key, skip the handler in silence and hand back the result kept from the run before. There is no API to delete one today. Until there is, the way out is to wait the retention out, or to delete the key in Redis by hand.
 
 **A green replay is not proof the work ran.** A job with both `timeoutMs` and `idempotencyKey` can be buried on its deadline while its detached body keeps running and completes the key — and the replay of that entry hands back the kept result without calling the handler. It is described in full under [Dead queue](#dead-queue) and [`timeoutMs` with `idempotencyKey`](#timeoutms-with-idempotencykey).
 
@@ -791,7 +791,7 @@ A pause stops **fetching**, not the jobs already fetched: what is active when yo
 
 ## Development
 
-This section is for contributors to juibs itself, not for consumers of the library.
+This section is for contributors to jubs itself, not for consumers of the library.
 
 The unit tests need nothing. The integration tests run against a real Redis, so start one locally before you run them.
 

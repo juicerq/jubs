@@ -25,7 +25,7 @@ export interface HandlerContext {
 	 *
 	 * Pass it to whatever waits — `fetch`, a database client, another
 	 * `AbortSignal`-aware library — and **throw** once it aborts. A handler that
-	 * returns normally after an abort is recorded as a success, and juibs has no
+	 * returns normally after an abort is recorded as a success, and jubs has no
 	 * way to know the work stopped half done. A handler that finished just before
 	 * the abort should still return: a return is always a success.
 	 */
@@ -86,12 +86,12 @@ export type HandlerRun<
 function strayMigration(name: string, from: string, version: number): Error {
 	if (version <= DEFAULT_PAYLOAD_VERSION) {
 		return new Error(
-			`juibs: the job "${name}" declares a migration from version ${from}, which never runs — the job runs payload version ${version}, so it takes no migration at all; raise its \`version\` first`,
+			`jubs: the job "${name}" declares a migration from version ${from}, which never runs — the job runs payload version ${version}, so it takes no migration at all; raise its \`version\` first`,
 		)
 	}
 
 	return new Error(
-		`juibs: the job "${name}" declares a migration from version ${from}, which never runs — the job runs payload version ${version}, so a migration key is a whole number between 1 and ${version - 1}`,
+		`jubs: the job "${name}" declares a migration from version ${from}, which never runs — the job runs payload version ${version}, so a migration key is a whole number between 1 and ${version - 1}`,
 	)
 }
 
@@ -102,7 +102,7 @@ function assertVersioning(
 
 	if (!Number.isInteger(version) || version < 1) {
 		throw new Error(
-			`juibs: the job "${definition.name}" declares the payload version ${version} — a payload version is a whole number of 1 or more`,
+			`jubs: the job "${definition.name}" declares the payload version ${version} — a payload version is a whole number of 1 or more`,
 		)
 	}
 
@@ -131,7 +131,7 @@ function assertTimeout(definition: Pick<JobDefinition, "name" | "timeoutMs">): v
 	}
 
 	throw new Error(
-		`juibs: the job "${definition.name}" declares the \`timeoutMs\` ${timeoutMs} — a timeout is a number of milliseconds above 0, so give it one or drop \`timeoutMs\` to let the handler run for as long as it takes`,
+		`jubs: the job "${definition.name}" declares the \`timeoutMs\` ${timeoutMs} — a timeout is a number of milliseconds above 0, so give it one or drop \`timeoutMs\` to let the handler run for as long as it takes`,
 	)
 }
 

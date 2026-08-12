@@ -37,7 +37,7 @@ export interface JobSnapshot {
 	readonly state: JobState
 	/**
 	 * The envelope the job carries, and `undefined` when what is stored is not a
-	 * juibs envelope — a job another producer put on the same queue.
+	 * jubs envelope — a job another producer put on the same queue.
 	 */
 	readonly envelope: Envelope | undefined
 	/**
