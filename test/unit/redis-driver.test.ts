@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { ConnectionOptions } from "bullmq"
 import { DELIVERY_DEFAULTS, type ResolvedUnique } from "@/Delivery"
-import { assertBlockingConnection, toJobsOptions } from "@/RedisDriver"
+import { assertBlockingConnection, HELD_RETRY_MS, readLease, toJobsOptions } from "@/RedisDriver"
 
 function connection(shape: unknown): ConnectionOptions {
 	return shape as ConnectionOptions
@@ -75,5 +75,36 @@ describe("toJobsOptions", () => {
 
 	test("a delivery with no unique sends no deduplication at all", () => {
 		expect(toJobsOptions(DELIVERY_DEFAULTS).deduplication).toBeUndefined()
+	})
+})
+
+describe("the idempotency lease Redis replies with", () => {
+	test("an empty reply means the lease was taken, under the token that asked for it", () => {
+		expect(readLease([], "token-1")).toEqual({ state: "acquired", token: "token-1" })
+	})
+
+	test("a running marker means another delivery holds the lease, and its ttl is the wait", () => {
+		expect(readLease(["running:token-0", 5_000], "token-1")).toEqual({
+			state: "held",
+			retryInMs: 5_000,
+		})
+	})
+
+	test("a stored kept result means the key is complete", () => {
+		expect(readLease(['{"result":{"receipt":"r-1"}}', 5_000], "token-1")).toEqual({
+			state: "complete",
+			kept: { result: { receipt: "r-1" } },
+		})
+	})
+
+	test("a completion marker alone means the key is complete and gives back nothing", () => {
+		expect(readLease(["{}", 5_000], "token-1")).toEqual({ state: "complete", kept: {} })
+	})
+
+	test("a running marker without a positive ttl waits the default instead", () => {
+		expect(readLease(["running:token-0", -2], "token-1")).toEqual({
+			state: "held",
+			retryInMs: HELD_RETRY_MS,
+		})
 	})
 })

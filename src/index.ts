@@ -25,6 +25,7 @@ export type {
 export type { Envelope, TraceContext } from "@/Envelope"
 export type { SerializedError } from "@/Failure"
 export type { JobEvent, JobFailureEvent, JobHooks } from "@/Hooks"
+export { type IdempotencyStore, LeaseHeldError } from "@/Idempotency"
 export { type PayloadMigration, VersionAheadError } from "@/Migration"
 export { PayloadError } from "@/Payload"
 export { redisDriver } from "@/RedisDriver"

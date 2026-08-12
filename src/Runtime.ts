@@ -14,6 +14,7 @@ import type {
 import { type Envelope, readEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
+import { idempotencyKeyFor, LeaseHeldError, runUnderKey } from "@/Idempotency"
 import { assertVersionIsKnown, migrateEnvelope, VersionAheadError } from "@/Migration"
 import { validatePayload } from "@/Payload"
 import type { Schedule } from "@/Schedule"
@@ -277,12 +278,16 @@ export async function startRuntime(
 			throw unrecoverable(error)
 		})
 
-		const result = await handler.run(data, {
-			id: delivery.id,
-			attempt: delivery.attempt,
-			maxAttempts: delivery.maxAttempts,
-			origin: envelope.origin,
-		})
+		const run = () =>
+			handler.run(data, {
+				id: delivery.id,
+				attempt: delivery.attempt,
+				maxAttempts: delivery.maxAttempts,
+				origin: envelope.origin,
+			})
+
+		const key = idempotencyKeyFor(handler.definition, data)
+		const result = key ? await runUnderKey(config.driver.idempotency, key, run) : await run()
 
 		await notify(config.hooks?.onSuccess, "onSuccess", event)
 
@@ -332,6 +337,10 @@ export async function startRuntime(
 			}
 
 			return dispatch(envelope, event, delivery).catch(async (error: unknown) => {
+				if (error instanceof LeaseHeldError) {
+					throw error
+				}
+
 				await report(envelope, event, delivery, error)
 
 				throw error

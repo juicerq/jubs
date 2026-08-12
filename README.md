@@ -303,6 +303,49 @@ export const syncAccount = defineJob({
 
 The memory driver throws on `unique`. Uniqueness is decided inside Redis, atomically and on a clock; an inline imitation would agree with your test and disagree with production. Test it against `redisDriver`.
 
+## Idempotency
+
+`idempotencyKey` stops a second **execution**; `unique` stops a second **enqueue**. That is the whole difference. Uniqueness works before the job exists and decides which one survives; the idempotency key works when a delivery is already in a worker's hands, and decides whether the handler runs at all.
+
+The key sits on the definition, beside the payload schema — it is not a delivery option. The function reads the **validated** payload and returns the key, exactly as `unique`'s `key` does.
+
+```ts
+export const chargeCard = defineJob({
+	name: "billing.charge",
+	queue: "billing",
+	payload: type({ orderId: "string", cents: "number" }),
+	idempotencyKey: (data) => data.orderId,
+})
+```
+
+Two deliveries of that job for the same `orderId` capture the card once. The second one never reaches the payment gateway.
+
+A key is in one of three states, and the state decides what the delivery does.
+
+| State | What the delivery does |
+| --- | --- |
+| absent | takes the key and runs the handler |
+| held by a running delivery, under a lease that expires | is rescheduled, and arrives again later |
+| complete, with a kept record | skips the handler and gives back the kept result |
+
+**A rescheduled delivery consumes no attempt.** It is moved back to the queue with a delay and delivered again; the attempt counter does not move, `onAttemptFailed` and `onDead` do not fire, and nothing is buried. There is no ceiling on it either — a delivery that keeps meeting a held key keeps being rescheduled, for as long as the key stays held. The lease is what ends that wait: when it expires, the next delivery takes the key and runs.
+
+Three values are fixed today and configurable by nothing: the lease is **30 seconds**, it is renewed every **10 seconds** while the handler runs, and a complete key keeps its result for **24 hours**. Renewal is why a handler slower than 30 seconds is safe — the lease follows it for as long as it runs.
+
+A kept result has a size limit of **64 KB**. Above it, juibs keeps the completion marker alone: the key still counts as complete, the handler is still skipped, but the repeated delivery gets `undefined` instead of the result. A result JSON cannot serialise is kept the same way. Return a receipt id, not the receipt.
+
+The lease is what makes this correct, and the reason is worth spelling out. Marking the key before running and skipping it on the repeat would be at-most-once, not idempotent: a worker killed between the mark and the end would leave a key that says done over work that never happened, and every later delivery would report success for a charge nobody made. The lease says *in progress*, not *done*, and it expires — so a killed worker gives the job back instead of losing it.
+
+**A handler that throws releases the lease.** It is not held for the rest of its 30 seconds: the retry BullMQ schedules finds the key absent and runs. A failed job retries at its own pace, as it would with no key at all.
+
+Hooks see a rescheduled delivery as a start with no end. `onStart` fires before the key is read, so a delivery that meets a held lease fires `onStart` and nothing else. A hooks consumer that pairs a start with an end has to tolerate a start alone — the same way it has to tolerate an end alone, which a job whose name no handler owns already produces.
+
+`dead.replay` and `dead.discard` are at-least-once: two operators acting on the same dead id can both succeed, and the job is enqueued twice. `idempotencyKey` is the remedy — the second delivery skips the handler.
+
+A scheduled job reaches exactly-once only through `idempotencyKey`. The occurrence a scheduler produces does not carry `unique`, as described above, so the key is the only exclusion left to it.
+
+The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result, and a failing handler releases the key. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
+
 ## Scheduling
 
 A schedule is the recurrence rule that makes a job run on its own, without a producer. It sits on the definition, beside the payload schema and the delivery policy, so the recurrence is declared where the job is declared — not in a crontab, not in a wiring file some other team owns.
@@ -381,7 +424,7 @@ export const digestHandler = defineHandler(sendDigest, async (data, context) => 
 })
 ```
 
-The occurrence the scheduler produces does **not** carry `unique`. BullMQ writes the deduplication option onto the scheduler's template and then ignores it — no key is ever taken — so juibs drops it rather than promise what the layer below does not keep. The recurrence still gives every occurrence its own identity: BullMQ produces one job per occurrence, with a deterministic id. That is identity, not exclusion. `unique` keeps working normally when the same definition is enqueued by hand.
+The occurrence the scheduler produces does **not** carry `unique`. BullMQ writes the deduplication option onto the scheduler's template and then ignores it — no key is ever taken — so juibs drops it rather than promise what the layer below does not keep. The recurrence still gives every occurrence its own identity: BullMQ produces one job per occurrence, with a deterministic id. That is identity, not exclusion. `unique` keeps working normally when the same definition is enqueued by hand. An occurrence that must run exactly once needs `idempotencyKey` instead — see [Idempotency](#idempotency).
 
 **An occurrence that takes longer than the interval overlaps the next one.** The scheduler produces the next occurrence by the clock, without looking at whether the previous one finished: a 3 second handler on `every("1 second")` reaches four runs at the same time. juibs does not prevent it, and `noOverlap` cannot help — it is the very option the scheduler's template drops. The defence is yours: an interval longer than the worst duration, or a lock inside the handler.
 
@@ -450,7 +493,7 @@ await jobs.dead.discard(dead[1].id)
 
 A replay ignores `unique`. The key of a dead job is often still taken — by the dead job itself — and honouring it would drop the replay in silence, which is the one outcome a dead queue exists to prevent. For the same reason a replayed `keepLast` job does not sit out its window: you asked for this job now.
 
-Replay and discard are at-least-once, like every delivery here. Two operators acting on the same dead id at the same moment can both succeed — two replays enqueue the job twice, and a replay racing a discard can do both. Nothing is lost, but a handler can run twice, so keep your handlers safe to repeat. An idempotency key is the coming remedy.
+Replay and discard are at-least-once, like every delivery here. Two operators acting on the same dead id at the same moment can both succeed — two replays enqueue the job twice, and a replay racing a discard can do both. Nothing is lost, but a handler can run twice, so keep your handlers safe to repeat. `idempotencyKey` is the remedy — see [Idempotency](#idempotency).
 
 Writing to the dead queue never changes a job's outcome. If Redis refuses the write, juibs reports it on `console.error` and the job still fails the way it would have.
 

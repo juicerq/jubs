@@ -22,12 +22,14 @@ export interface JobDefinition<Payload extends StandardSchemaV1 = StandardSchema
 	readonly migrations?: Readonly<Record<number, PayloadMigration>>
 	readonly delivery?: DeliveryPolicy
 	readonly schedule?: Schedule
+	readonly idempotencyKey?: (data: unknown) => string
 }
 
 export interface JobDefinitionInput<Payload extends StandardSchemaV1>
-	extends Omit<JobDefinition<Payload>, "delivery" | "schedule"> {
+	extends Omit<JobDefinition<Payload>, "delivery" | "schedule" | "idempotencyKey"> {
 	readonly delivery?: DeliveryPolicy<StandardSchemaV1.InferOutput<Payload>>
 	readonly schedule?: Schedule<StandardSchemaV1.InferInput<Payload>>
+	readonly idempotencyKey?: (data: StandardSchemaV1.InferOutput<Payload>) => string
 }
 
 export function payloadVersion(definition: JobDefinition): number {
@@ -88,7 +90,11 @@ export function defineJob<Payload extends StandardSchemaV1>(
 	const named = { name: input.name, queue: input.queue, payload: input.payload }
 	const versioned = input.version ? { ...named, version: input.version } : named
 	const migrating = input.migrations ? { ...versioned, migrations: input.migrations } : versioned
-	const definition = input.schedule ? { ...migrating, schedule: input.schedule } : migrating
+	const scheduled = input.schedule ? { ...migrating, schedule: input.schedule } : migrating
+
+	const definition = input.idempotencyKey
+		? { ...scheduled, idempotencyKey: input.idempotencyKey as (data: unknown) => string }
+		: scheduled
 
 	if (!input.delivery) {
 		return definition

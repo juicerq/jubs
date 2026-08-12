@@ -1,9 +1,13 @@
+import { randomUUID } from "node:crypto"
 import {
 	type ConnectionOptions,
 	type DeduplicationOptions,
+	DelayedError,
+	type Job,
 	type JobSchedulerTemplateOptions,
 	type JobsOptions,
 	Queue,
+	type RedisClient,
 	type RepeatOptions,
 	Worker,
 	type WorkerOptions,
@@ -11,8 +15,72 @@ import {
 import { type DeadEntry, deadQueueName } from "@/Dead"
 import type { Delivery, ResolvedUnique } from "@/Delivery"
 import type { ConsumeRequest, JobDriver, ScheduleUpsert } from "@/Driver"
+import {
+	type IdempotencyLease,
+	type IdempotencyStore,
+	type KeptResult,
+	LeaseHeldError,
+} from "@/Idempotency"
 
 const SCHEDULER_PREFIX = "juibs."
+
+const IDEMPOTENCY_QUEUE = "juibs.idempotency"
+
+export const IDEMPOTENCY_KEY_PREFIX = "juibs:idem:"
+
+export const RUNNING_PREFIX = "running:"
+
+const ACQUIRE_COMMAND = "juibsIdempotencyAcquire"
+
+const RENEW_COMMAND = "juibsIdempotencyRenew"
+
+const COMPLETE_COMMAND = "juibsIdempotencyComplete"
+
+const RELEASE_COMMAND = "juibsIdempotencyRelease"
+
+const ACQUIRE_LUA = `
+local current = redis.call("GET", KEYS[1])
+
+if current then
+  return { current, redis.call("PTTL", KEYS[1]) }
+end
+
+redis.call("SET", KEYS[1], ARGV[1], "PX", tonumber(ARGV[2]))
+
+return {}
+`
+
+const RENEW_LUA = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  redis.call("PEXPIRE", KEYS[1], tonumber(ARGV[2]))
+
+  return 1
+end
+
+return 0
+`
+
+const COMPLETE_LUA = `
+local current = redis.call("GET", KEYS[1])
+
+if current and current ~= ARGV[1] then
+  return 0
+end
+
+redis.call("SET", KEYS[1], ARGV[2], "PX", tonumber(ARGV[3]))
+
+return 1
+`
+
+const RELEASE_LUA = `
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  redis.call("DEL", KEYS[1])
+
+  return 1
+end
+
+return 0
+`
 
 function schedulerId(jobName: string): string {
 	return `${SCHEDULER_PREFIX}${jobName}`
@@ -116,6 +184,101 @@ export function toJobsOptions(delivery: Delivery): JobsOptions {
 	return { ...options, delay: delivery.delayMs }
 }
 
+export const HELD_RETRY_MS = 1_000
+
+async function openIdempotencyClient(connection: ConnectionOptions): Promise<RedisClient> {
+	const handle = new Queue(IDEMPOTENCY_QUEUE, { connection, skipMetasUpdate: true })
+	const client = await handle.getBackend().client
+
+	client.defineCommand(ACQUIRE_COMMAND, { numberOfKeys: 1, lua: ACQUIRE_LUA })
+	client.defineCommand(RENEW_COMMAND, { numberOfKeys: 1, lua: RENEW_LUA })
+	client.defineCommand(COMPLETE_COMMAND, { numberOfKeys: 1, lua: COMPLETE_LUA })
+	client.defineCommand(RELEASE_COMMAND, { numberOfKeys: 1, lua: RELEASE_LUA })
+
+	return client
+}
+
+export function readLease(reply: unknown, token: string): IdempotencyLease {
+	const [current, ttl] = Array.isArray(reply) ? reply : []
+
+	if (typeof current !== "string") {
+		return { state: "acquired", token }
+	}
+
+	if (current.startsWith(RUNNING_PREFIX)) {
+		return { state: "held", retryInMs: typeof ttl === "number" && ttl > 0 ? ttl : HELD_RETRY_MS }
+	}
+
+	return { state: "complete", kept: JSON.parse(current) as KeptResult }
+}
+
+/**
+ * Keeps the three idempotency states in Redis, under the `juibs:idem:` prefix.
+ *
+ * Every operation is a Lua script registered once per client, so reading the key
+ * and acting on it is one atomic step, and the narrow `IRedisClient` interface —
+ * which declares no `SET NX` and no `PTTL` — never limits what the store can do.
+ *
+ * A running lease is stored as `running:<token>`, and a complete key as the JSON
+ * kept result, so the two are told apart by the prefix. `renew`, `complete` and
+ * `release` compare the stored token before they act, so a worker whose lease
+ * expired under a running handler cannot renew, finish or free the lease that a
+ * second worker took after it. `complete` still writes when the key is gone,
+ * because nobody holds it then.
+ *
+ * The client comes from a `Queue` handle opened with `skipMetasUpdate`, so the
+ * handle writes no key of its own and the store shares the caller's connection.
+ * The queue it names holds no job and takes no worker.
+ */
+function redisIdempotency(connection: ConnectionOptions): IdempotencyStore {
+	let opening: Promise<RedisClient> | undefined
+
+	function client(): Promise<RedisClient> {
+		opening ??= openIdempotencyClient(connection)
+
+		return opening
+	}
+
+	function redisKey(key: string): string {
+		return `${IDEMPOTENCY_KEY_PREFIX}${key}`
+	}
+
+	function heldBy(token: string): string {
+		return `${RUNNING_PREFIX}${token}`
+	}
+
+	return {
+		async acquire({ key, leaseMs }) {
+			const token = randomUUID()
+
+			const reply = await (await client()).runCommand(ACQUIRE_COMMAND, [
+				redisKey(key),
+				heldBy(token),
+				leaseMs,
+			])
+
+			return readLease(reply, token)
+		},
+
+		async renew({ key, token, leaseMs }) {
+			await (await client()).runCommand(RENEW_COMMAND, [redisKey(key), heldBy(token), leaseMs])
+		},
+
+		async complete({ key, token, kept, retainForMs }) {
+			await (await client()).runCommand(COMPLETE_COMMAND, [
+				redisKey(key),
+				heldBy(token),
+				JSON.stringify(kept),
+				retainForMs,
+			])
+		},
+
+		async release({ key, token }) {
+			await (await client()).runCommand(RELEASE_COMMAND, [redisKey(key), heldBy(token)])
+		},
+	}
+}
+
 function toWorkerOptions(request: ConsumeRequest, connection: ConnectionOptions): WorkerOptions {
 	const options: WorkerOptions = { connection, concurrency: request.concurrency }
 
@@ -129,8 +292,26 @@ function toWorkerOptions(request: ConsumeRequest, connection: ConnectionOptions)
 	}
 }
 
+async function reschedule(
+	job: Job,
+	token: string | undefined,
+	held: LeaseHeldError,
+): Promise<never> {
+	if (!token) {
+		throw new Error(
+			`juibs: redis delivered job "${job.name}" without a worker token, and its idempotency key is held by another delivery — juibs cannot reschedule the delivery without the token, so it fails the attempt instead`,
+			{ cause: held },
+		)
+	}
+
+	await job.moveToDelayed(Date.now() + held.delayMs, token)
+
+	throw new DelayedError(held.message)
+}
+
 export function redisDriver(connection: ConnectionOptions): JobDriver {
 	const queues = new Map<string, Queue>()
+	const idempotency = redisIdempotency(connection)
 
 	function queueFor(name: string): Queue {
 		const open = queues.get(name)
@@ -147,6 +328,8 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 	}
 
 	return {
+		idempotency,
+
 		async enqueue(request) {
 			const job = await queueFor(request.queue).add(
 				request.envelope.name,
@@ -228,17 +411,25 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 
 			const worker = new Worker(
 				request.queue,
-				async (job) => {
+				async (job, token) => {
 					if (!job.id) {
 						throw new Error(`juibs: redis delivered job "${job.name}" without an id`)
 					}
 
-					return request.run({
-						id: job.id,
-						attempt: job.attemptsMade + 1,
-						maxAttempts: job.opts.attempts ?? 1,
-						envelope: job.data,
-					})
+					return request
+						.run({
+							id: job.id,
+							attempt: job.attemptsMade + 1,
+							maxAttempts: job.opts.attempts ?? 1,
+							envelope: job.data,
+						})
+						.catch((error: unknown) => {
+							if (error instanceof LeaseHeldError) {
+								return reschedule(job, token, error)
+							}
+
+							throw error
+						})
 				},
 				toWorkerOptions(request, connection),
 			)

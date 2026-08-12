@@ -1,8 +1,10 @@
+import { randomUUID } from "node:crypto"
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import type { DeadEntry } from "@/Dead"
 import type { JobDefinition } from "@/Definition"
 import type { ConsumeRequest, JobDriver } from "@/Driver"
 import type { Envelope } from "@/Envelope"
+import { type IdempotencyStore, type KeptResult, LeaseHeldError } from "@/Idempotency"
 
 const ACCEPTED_DELIVERY = [
 	"attempts",
@@ -65,12 +67,21 @@ export interface MemoryDriver extends JobDriver {
  * recurrence is nothing but a clock: an inline imitation would fire when your
  * test asked it to and never again in production. A started queue that declares
  * no schedule reconciles to nothing and passes.
+ *
+ * The idempotency store keeps the absent and the complete state for real, so a
+ * repeated delivery of a completed key skips the handler and gives back the kept
+ * result. It keeps no clock, so `leaseMs` and the result retention are ignored
+ * and a lease never expires on its own. A delivery that meets a held lease has
+ * to be rescheduled, which needs a clock, so it throws instead: test a held
+ * lease, an expired lease and a killed worker against `redisDriver`.
  */
 export function memoryDriver(): MemoryDriver {
 	const recorded: MemoryJob[] = []
 	const pending: MemoryJob[] = []
 	const consumers = new Map<string, ConsumeRequest["run"]>()
 	const buried = new Map<string, MemoryDeadQueue>()
+	const leased = new Map<string, string>()
+	const kept = new Map<string, KeptResult>()
 
 	function deadQueueFor(queue: string): MemoryDeadQueue {
 		const open = buried.get(queue)
@@ -108,10 +119,59 @@ export function memoryDriver(): MemoryDriver {
 			attempt: 1,
 			maxAttempts: next.maxAttempts,
 			envelope: next.envelope,
+		}).catch((error: unknown) => {
+			if (error instanceof LeaseHeldError) {
+				throw unsupported("rescheduling a delivery whose idempotency lease is held")
+			}
+
+			throw error
 		})
 	}
 
+	const idempotency: IdempotencyStore = {
+		async acquire({ key, leaseMs }) {
+			const complete = kept.get(key)
+
+			if (complete) {
+				return { state: "complete", kept: complete }
+			}
+
+			if (leased.has(key)) {
+				return { state: "held", retryInMs: leaseMs }
+			}
+
+			const token = randomUUID()
+
+			leased.set(key, token)
+
+			return { state: "acquired", token }
+		},
+
+		async renew() {},
+
+		async complete({ key, token, kept: result }) {
+			const held = leased.get(key)
+
+			if (held !== undefined && held !== token) {
+				return
+			}
+
+			leased.delete(key)
+			kept.set(key, result)
+		},
+
+		async release({ key, token }) {
+			if (leased.get(key) !== token) {
+				return
+			}
+
+			leased.delete(key)
+		},
+	}
+
 	return {
+		idempotency,
+
 		async enqueue(request) {
 			const rejected = Object.keys(request.delivery).find((key) => !ACCEPTED_DELIVERY.includes(key))
 

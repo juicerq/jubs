@@ -1,6 +1,7 @@
 import type { DeadEntry } from "@/Dead"
 import type { Delivery } from "@/Delivery"
 import type { Envelope } from "@/Envelope"
+import type { IdempotencyStore } from "@/Idempotency"
 import type { Recurrence } from "@/Schedule"
 
 export interface EnqueueRequest {
@@ -60,4 +61,5 @@ export interface JobDriver {
 	consume(request: ConsumeRequest): Promise<Consumer>
 	reconcileSchedules(request: ReconcileRequest): Promise<void>
 	readonly dead: DeadStore
+	readonly idempotency: IdempotencyStore
 }
