@@ -37,6 +37,22 @@ describe("burying a dead job", () => {
 		expect(buried[0]?.reason).toBe("attempts_exhausted")
 	})
 
+	test("names the job it buried, apart from the id of the record that keeps it", async () => {
+		const driver = memoryDriver()
+		const jobs = createJobs({ driver, deadQueues: ["billing"] })
+
+		await jobs.start([declined])
+
+		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+
+		await driver.drain().catch(() => {})
+
+		const buried = await jobs.dead.list("billing")
+
+		expect(buried[0]?.jobId).toBe(enqueued.id)
+		expect(buried[0]?.id).toBe("billing.dead:1")
+	})
+
 	test("marks a job the handler gave up on as unrecoverable", async () => {
 		const driver = memoryDriver()
 		const jobs = createJobs({ driver, deadQueues: ["billing"] })
@@ -209,6 +225,7 @@ describe("inspecting and replaying a dead job", () => {
 		const jobs = createJobs({ driver, deadQueues: ["search"], definitions: [rebuildIndex] })
 
 		await driver.dead.bury("search", {
+			jobId: "search:1",
 			envelope: { v: 1, name: "search.rebuild", data: { entityId: "e_1" }, origin: "direct" },
 			error: { name: "Error", message: "the index refused the write" },
 			reason: "attempts_exhausted",

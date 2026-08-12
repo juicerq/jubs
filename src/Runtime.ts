@@ -2,11 +2,17 @@ import { UnrecoverableError } from "bullmq"
 import { CANCEL_SWEEP_MS, CancelledError, type RunningDelivery } from "@/Cancellation"
 import type { JobsConfig } from "@/Client"
 import { type DeadReason, deadQueueName } from "@/Dead"
-import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
+import {
+	type HandlerContext,
+	type JobDefinition,
+	type JobHandler,
+	payloadVersion,
+} from "@/Definition"
 import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type {
 	ConsumeRequest,
 	Consumer,
+	FlowState,
 	JobDelivery,
 	JobDriver,
 	QueueLimiter,
@@ -14,6 +20,7 @@ import type {
 } from "@/Driver"
 import { type Envelope, readEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
+import { ChildDeadError } from "@/Flow"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
 import {
 	idempotencyKeyFor,
@@ -102,6 +109,49 @@ function envelopeOf(delivery: JobDelivery): Envelope {
 	}
 }
 
+const NO_CHILDREN: FlowState = { results: [], failures: [] }
+
+/**
+ * Reads the results of one definition out of what this job's children settled
+ * into, and puts each one through that definition's `result` schema. A value
+ * the schema refuses fails this job for good: the child is done, so running the
+ * parent again would read the very same value.
+ */
+function childrenOf(state: FlowState): HandlerContext["children"] {
+	function read(definition: JobDefinition): Promise<unknown[]> {
+		const mine = state.results.filter(
+			(result) => result.queue === definition.queue && result.name === definition.name,
+		)
+
+		return Promise.all(
+			mine.map((result) =>
+				validateResult(definition, result.value).catch((error: unknown) => {
+					throw unrecoverable(error)
+				}),
+			),
+		)
+	}
+
+	return read as HandlerContext["children"]
+}
+
+/**
+ * The error a burial reads through, whether it is the one thrown or the cause
+ * of the `UnrecoverableError` that carries it — the same shape `ResultError`
+ * reaches a dead entry in.
+ */
+function childDead(error: unknown): ChildDeadError | undefined {
+	if (error instanceof ChildDeadError) {
+		return error
+	}
+
+	if (error instanceof UnrecoverableError && error.cause instanceof ChildDeadError) {
+		return error.cause
+	}
+
+	return undefined
+}
+
 function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
 	if (error instanceof CancelledError) {
 		return "cancelled"
@@ -109,6 +159,10 @@ function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefin
 
 	if (error instanceof VersionAheadError) {
 		return "version_ahead"
+	}
+
+	if (childDead(error)) {
+		return "child_dead"
 	}
 
 	if (error instanceof UnrecoverableError) {
@@ -364,6 +418,15 @@ export async function startRuntime(
 			throw unrecoverable(error)
 		})
 
+		const state =
+			envelope.origin === "flow"
+				? await config.driver.flow.read(event.queue, delivery.id)
+				: NO_CHILDREN
+
+		if (state.failures.length > 0) {
+			throw unrecoverable(new ChildDeadError(envelope.name, state))
+		}
+
 		const controller = new AbortController()
 
 		const run = () => {
@@ -383,6 +446,7 @@ export async function startRuntime(
 					attempt: delivery.attempt,
 					maxAttempts: delivery.maxAttempts,
 					origin: envelope.origin,
+					children: childrenOf(state),
 					signal: controller.signal,
 				})
 
@@ -445,8 +509,11 @@ export async function startRuntime(
 		}
 
 		if (deadQueues.has(event.queue)) {
+			const dead = childDead(error)
+			const buried = { jobId: event.id, envelope, error: failure.error, reason }
+
 			await config.driver.dead
-				.bury(event.queue, { envelope, error: failure.error, reason })
+				.bury(event.queue, dead ? { ...buried, children: dead.results } : buried)
 				.catch((refused: unknown) => {
 					console.error(
 						`juibs: the dead queue did not keep job "${event.name}"; the job outcome is unchanged`,

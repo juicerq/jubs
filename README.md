@@ -142,11 +142,11 @@ test("welcoming a user sends one email", async () => {
 })
 ```
 
-The memory driver does not simulate the clock, delays, backoff, retries, priority ordering, uniqueness windows, schedules or stalled recovery. Jobs run first in, first out, always on attempt 1, and a failing handler throws out of `drain()` instead of being retried. Anything time-dependent is only testable against `redisDriver`.
+The memory driver does not simulate the clock, delays, backoff, retries, priority ordering, uniqueness windows, schedules, flows or stalled recovery. Jobs run first in, first out, always on attempt 1, and a failing handler throws out of `drain()` instead of being retried. Anything time-dependent is only testable against `redisDriver`.
 
 It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and `keepFailedCount`, but only `attempts` reaches your handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored. Per-queue `concurrency` is accepted and ignored too — jobs run inline, one at a time.
 
-Everything else throws, and that is the point. `delayMs`, `unique` and a queue `limiter` are time-dependent, so the memory driver refuses them instead of pretending. The error names the option and sends you to `redisDriver`, so a behaviour this driver never learns to simulate fails loudly instead of passing a test it would fail in production.
+Everything else throws, and that is the point. `delayMs`, `unique` and a queue `limiter` are time-dependent, so the memory driver refuses them instead of pretending. `jobs.flow` throws for a related reason: jobs run inline, so a parent would run before its children — see [Flows](#flows). The error names the option and sends you to `redisDriver`, so a behaviour this driver never learns to simulate fails loudly instead of passing a test it would fail in production.
 
 ## Payload validation on both sides
 
@@ -457,6 +457,113 @@ A scheduled definition with `delayMs` in its delivery makes `start` throw. A del
 
 The memory driver refuses a schedule. It does not simulate the clock, so starting a queue whose handlers declare one throws. A started queue that declares no schedule reconciles to nothing and passes. Test a schedule against `redisDriver`.
 
+## Flows
+
+A flow is a job that waits on child jobs and reads their results. The parent runs once, after every child has settled, with what they returned at hand. It nests to any depth and crosses queues.
+
+```ts
+// jobs/definitions.ts
+export const fetchRows = defineJob({
+	name: "report.fetch",
+	queue: "analytics",
+	payload: type({ source: "string" }),
+	result: type({ rows: "number" }),
+})
+
+export const buildReport = defineJob({
+	name: "report.build",
+	queue: "reports",
+	payload: type({ month: "string" }),
+	result: type({ url: "string.url" }),
+})
+
+export const mailReport = defineJob({
+	name: "report.mail",
+	queue: "reports",
+	payload: type({ to: "string" }),
+})
+```
+
+`jobs.flow` takes the root, and `child` describes every node below it.
+
+```ts
+import { child } from "@juicerq/juibs"
+
+const enqueued = await jobs.flow(
+	mailReport,
+	{ to: "finance@example.com" },
+	{
+		children: [
+			child(
+				buildReport,
+				{ month: "2026-01" },
+				{
+					children: [
+						child(fetchRows, { source: "ledger" }),
+						child(fetchRows, { source: "invoices" }),
+					],
+				},
+			),
+		],
+	},
+)
+```
+
+The two `fetchRows` jobs run first, on `analytics`. `buildReport` runs when both are done, `mailReport` when `buildReport` is done. `flow` gives back the id of the **root**, in the same form `enqueue` gives back. The whole tree is validated before anything reaches Redis, so a node a rule refuses stops the flow with nothing enqueued.
+
+`context.children(definition)` is how a parent reads its children.
+
+```ts
+export const buildReportHandler = defineHandler(buildReport, async (data, context) => {
+	const parts = await context.children(fetchRows)
+	const rows = parts.reduce((sum, part) => sum + part.rows, 0)
+
+	return { url: await reports.render(data.month, rows) }
+})
+```
+
+It answers for the children of this very job, for the one definition asked, in the order Redis kept them, and each value comes back through that definition's own `result` schema — so `parts` is typed `{ rows: number }[]`. Two definitions sharing a queue stay apart. A job that is no part of a flow reads empty and touches Redis for nothing.
+
+**A flow is for fan-in.** Use it when one job needs the results of several. A job that merely *follows* another is not a flow: enqueue it at the end of the first job's handler. That way a failure retries the second job alone, where a flow would keep the first job's whole subtree in Redis to say the same thing.
+
+```ts
+export const chargeCardHandler = defineHandler(chargeCard, async (data) => {
+	const receipt = await gateway.capture(data.orderId)
+
+	await jobs.enqueue(sendReceipt, { orderId: data.orderId, receipt: receipt.id })
+})
+```
+
+**Uniqueness does not apply inside a flow, at any position.** A definition declaring `unique` makes `flow` throw, root or leaf, because BullMQ forbids deduplication beside a parent. Drop `unique` from its delivery, or enqueue that job on its own with `jobs.enqueue`.
+
+**`idempotencyKey` is refused on a node that waits on children.** A parent is fed by its children as much as by its payload, so a key derived from the payload alone names two different runs: a second flow over different children would meet the complete key and replay the first flow's result. A leaf keeps its key, because a leaf really is its payload alone.
+
+**A child that fails every attempt buries its parent.** The child does not fail the parent inside Redis — it drops out of the parent's dependencies, the parent runs, finds the failure and is buried with the reason `child_dead` before its handler is ever called. The dead entry keeps `children`: what the children that **did** finish returned, as the raw JSON Redis holds. So a replay is an informed decision rather than a guess. It propagates: a burial for `child_dead` buries the grandparent the same way.
+
+```ts
+const [dead] = await jobs.dead.list("reports")
+
+console.log(dead.reason) // "child_dead"
+console.log(dead.error.message) // names each child that failed, with its id
+console.log(dead.children) // what the others returned
+```
+
+**A flow job cannot be replayed.** `dead.replay` refuses any entry whose `origin` is `flow`, and says so: the replayed parent would be enqueued with no children at all, run over an empty result set and complete green. Put the flow back together instead.
+
+```ts
+await jobs.retry(childId) // the id from the parent entry's error message
+await jobs.retry(parentId) // dead.jobId — the parent itself, still in Redis
+
+await jobs.dead.discard(childEntry.id) // the records left behind
+await jobs.dead.discard(parentEntry.id)
+```
+
+`jobs.retry(childId)` returns the child to its parent's dependencies, and the parent then runs over a full set of results.
+
+**Keep a child's `result` schema idempotent.** It runs twice: once when the child finishes, on what the handler returned, and once when the parent reads it, on the JSON Redis kept. A transform that is not idempotent under JSON passes the first and fails the second — `string.numeric.parse` stores `500` and then refuses `500`, because `500` is no longer a string. The parent dies for good on that, with no further attempt: the child is done, so running the parent again would read the very same value.
+
+The memory driver does not simulate flows. `jobs.flow` throws there, and `context.children(definition)` reads empty for every job it delivers — jobs run inline, so nothing ever reaches `waiting_children`, and a parent that ran before its children would agree with your test and disagree with production. Test a flow against `redisDriver`.
+
 ## Hooks
 
 Hooks are the observability path. They are declared once on the client, fire on every execution the runtime performs, and are driver-agnostic — the memory driver fires them too, so a test can assert what your metrics would record.
@@ -499,7 +606,7 @@ Name the queue, not the job. Every definition on `billing` is kept the moment it
 
 Two checks guard the wiring. When you register `definitions`, `createJobs` refuses a dead queue no definition uses, because a typo would otherwise keep nothing and say nothing. And `start` refuses to open a worker on `billing.dead` itself, because a worker there would eat the copies you meant to keep.
 
-What is kept is the envelope, the serialised error and one of four reasons.
+What is kept is the envelope, the serialised error and one of five reasons.
 
 | Reason | What died |
 | --- | --- |
@@ -507,6 +614,7 @@ What is kept is the envelope, the serialised error and one of four reasons.
 | `unrecoverable` | the handler threw `UnrecoverableError` |
 | `version_ahead` | the payload was written by a newer deploy than this worker runs |
 | `cancelled` | `jobs.cancel(id)` reached the job while it ran — see [Operations](#operations) |
+| `child_dead` | a child of this job failed every attempt — see [Flows](#flows) |
 
 ```ts
 const dead = await jobs.dead.list("billing")
@@ -522,6 +630,8 @@ await jobs.dead.discard(dead[1].id)
 `id` is opaque — it names the queue and the stored job together. Read it from `list` and pass it back; do not build one.
 
 `replay` enqueues the job again from the stored envelope, so it runs with the payload it was first given, then drops the dead entry. It needs the definition, so the client that replays must register it in `createJobs({ definitions })` — the dead entry stores a job name, and only the definition knows the queue and the delivery policy that name gets today. `discard` drops the entry and enqueues nothing.
+
+`replay` refuses a job that was part of a flow, whatever killed it, and names the repair path instead — see [Flows](#flows).
 
 A replay ignores `unique`. The key of a dead job is often still taken — by the dead job itself — and honouring it would drop the replay in silence, which is the one outcome a dead queue exists to prevent. For the same reason a replayed `keepLast` job does not sit out its window: you asked for this job now.
 
@@ -692,6 +802,7 @@ type RetryResult =
 type CancelResult =
 	| { outcome: "removed" }
 	| { outcome: "aborting" }
+	| { outcome: "children_running" }
 	| { outcome: "unknown_job" }
 	| { outcome: "finished"; state: JobState }
 ```
@@ -704,7 +815,11 @@ What a cancellation does depends on whether the job has started.
 
 `removed` says the job is gone, not that it never ran. The state is read and the job is deleted in two steps, so a job that was waiting when it was read and started and finished before the deletion landed is deleted all the same, and the work it did stands. The window is narrow and it is left open on purpose: closing it would cost a lock on every cancellation to buy nothing, because whoever cancels a job racing its own start cannot know which of the two won anyway. The dead queue is declared at-least-once for the same reason.
 
-A job that waits on children is removed with those children. They exist to feed the job you cancelled, and would otherwise finish into a parent that is gone. Nothing in juibs builds a flow today, so this is the rule waiting for `flow`, not one you can meet yet.
+A job that waits on children is removed with those children. They exist to feed the job you cancelled, and would otherwise finish into a parent that is gone — see [Flows](#flows).
+
+**A cancellation that reaches a job whose children are still running cancels nothing.** The result is `children_running`. The job cannot be removed while a descendant holds its lock, and it is not running itself, so there is no delivery to abort either. Nothing changed in Redis. Cancel the running child first, or ask again once the children have settled.
+
+**Cancelling a child of a flow does two different things, depending on when it lands.** A child that has not started is `removed`: its branch leaves the parent's dependencies, and the parent runs with fewer results — `context.children(definition)` is simply short, with no error and no burial. The **same** child, once it is `active`, is aborted instead, which fails it for good and buries the parent with `child_dead`. Same call, same id, two outcomes decided by a race. juibs does not reconcile the two. Cancel the **root** to cancel a whole flow; a child is worth cancelling only when you know what its absence does to the parent.
 
 **A job that is already running cannot be removed.** BullMQ refuses to remove a job a worker holds the lock on, and juibs does not pretend otherwise. What happens instead is an abort: juibs marks the job, the runtime that holds the delivery aborts `context.signal`, and the handler ends the work itself. The result is `aborting` — the abort was asked for, not that the job has stopped.
 

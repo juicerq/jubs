@@ -4,6 +4,8 @@ import type {
 	ConsumeRequest,
 	Delivery,
 	Envelope,
+	FlowNode,
+	FlowState,
 	JobDelivery,
 	JobDriver,
 	ReconcileRequest,
@@ -29,8 +31,15 @@ export interface RecordedCompletion {
 	readonly kept: KeptResult
 }
 
+export interface RecordedFlowRead {
+	readonly queue: string
+	readonly id: string
+}
+
 export interface RecordingDriver extends JobDriver {
 	readonly enqueued: RecordedEnqueue[]
+	readonly flows: FlowNode[]
+	readonly flowReads: RecordedFlowRead[]
 	readonly consumed: ConsumeRequest[]
 	readonly reconciled: ReconcileRequest[]
 	readonly consuming: string[]
@@ -39,6 +48,7 @@ export interface RecordingDriver extends JobDriver {
 	readonly released: string[]
 	readonly completed: RecordedCompletion[]
 	deliver(queue: string, delivery: RecordedDelivery): Promise<unknown>
+	keepFlowState(state: FlowState): void
 	refuseClose(): void
 	refuseSchedules(): void
 	keepResult(key: string, kept: KeptResult): void
@@ -51,6 +61,9 @@ const REFUSED_CLOSE = "recordingDriver was told to refuse the close of this cons
 
 export function recordingDriver(): RecordingDriver {
 	const enqueued: RecordedEnqueue[] = []
+	const flows: FlowNode[] = []
+	const flowReads: RecordedFlowRead[] = []
+	let flowState: FlowState = { results: [], failures: [] }
 	const consumed: ConsumeRequest[] = []
 	const reconciled: ReconcileRequest[] = []
 	let refusing = false
@@ -80,12 +93,33 @@ export function recordingDriver(): RecordingDriver {
 
 	return {
 		enqueued,
+		flows,
+		flowReads,
 		consumed,
 		reconciled,
 		acquired,
 		renewed,
 		released,
 		completed,
+
+		keepFlowState(state) {
+			flowState = state
+		},
+
+		flow: {
+			async enqueue(root) {
+				delivered += 1
+				flows.push(root)
+
+				return { id: String(delivered) }
+			},
+
+			async read(queue, id) {
+				flowReads.push({ queue, id })
+
+				return flowState
+			},
+		},
 
 		refuseSchedules() {
 			refusing = true

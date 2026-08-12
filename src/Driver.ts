@@ -15,6 +15,63 @@ export interface EnqueuedJob {
 	readonly id: string
 }
 
+/**
+ * One job of a flow, and the jobs it waits on. It carries the three fields an
+ * `EnqueueRequest` carries, because every node of a flow is an ordinary job —
+ * the children are what make it a flow.
+ */
+export interface FlowNode extends EnqueueRequest {
+	readonly children: readonly FlowNode[]
+}
+
+/**
+ * What one child of a flow gave back. `name` is the name of the definition that
+ * ran, and `value` the JSON projection of what its handler returned — what
+ * Redis stored, before any `result` schema has seen it.
+ */
+export interface ChildResult {
+	readonly queue: string
+	readonly name: string
+	readonly value: unknown
+}
+
+/**
+ * One child of a flow that failed every attempt. The parent runs all the same,
+ * because a child's failure only drops it from the parent's dependencies, and
+ * the reason is what Redis kept of the last attempt.
+ *
+ * `id` is the child's id in the one form the whole API speaks, so whoever reads
+ * a buried parent can act on it: `jobs.retry(id)` puts the child back among the
+ * parent's dependencies, and the parent runs again over a full set of results.
+ */
+export interface ChildFailure {
+	readonly id: string
+	readonly name: string
+	readonly reason: string
+}
+
+/**
+ * What the children of one flow job settled into, read in one step: the results
+ * of those that finished, and the failures of those that did not.
+ */
+export interface FlowState {
+	readonly results: readonly ChildResult[]
+	readonly failures: readonly ChildFailure[]
+}
+
+/**
+ * Enqueues whole flows, and reads back what their children settled into.
+ *
+ * `enqueue` takes the root and adds every node of the tree in one step, so a
+ * flow either exists whole or not at all, and gives back the root — the job the
+ * producer holds an id for. `read` answers for one parent, named by its queue
+ * and stored id.
+ */
+export interface FlowStore {
+	enqueue(root: FlowNode): Promise<EnqueuedJob>
+	read(queue: string, id: string): Promise<FlowState>
+}
+
 export interface JobDelivery extends RunningDelivery {
 	readonly attempt: number
 	readonly maxAttempts: number
@@ -65,6 +122,12 @@ export type RetryResult =
  * is a job the cancellation arrived too late for, and carries the state it
  * settled in.
  *
+ * `children_running` is a job of a flow that waits on children of which at
+ * least one is running right now. **Nothing was cancelled.** The job cannot be
+ * removed while a descendant holds a lock, and it is not running itself, so
+ * there is no delivery to abort either. Cancel the running child first, or ask
+ * again once the children have settled.
+ *
  * `removed` says the job is gone, not that it never ran. The state is read and
  * the job is deleted in two steps, so a job that was waiting when it was read
  * and completed before the deletion landed is deleted all the same, and the
@@ -75,6 +138,7 @@ export type RetryResult =
 export type CancelResult =
 	| { readonly outcome: "removed" }
 	| { readonly outcome: "aborting" }
+	| { readonly outcome: "children_running" }
 	| { readonly outcome: "unknown_job" }
 	| { readonly outcome: "finished"; readonly state: JobState }
 
@@ -159,4 +223,5 @@ export interface JobDriver {
 	reconcileSchedules(request: ReconcileRequest): Promise<void>
 	readonly dead: DeadStore
 	readonly idempotency: IdempotencyStore
+	readonly flow: FlowStore
 }

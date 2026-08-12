@@ -170,6 +170,7 @@ describe("defineHandler", () => {
 				attempt: 1,
 				maxAttempts: 5,
 				origin: "direct",
+				children: async () => [],
 				signal: new AbortController().signal,
 			},
 		)

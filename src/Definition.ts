@@ -18,6 +18,20 @@ export interface HandlerContext {
 	readonly maxAttempts: number
 	readonly origin: Origin
 	/**
+	 * The results the children of this job returned, for the one definition
+	 * asked, in the order Redis kept them. What comes back is the JSON projection
+	 * of what each child's handler returned, put through that definition's
+	 * `result` schema — so a `Date` a child returned comes back as the schema
+	 * reads it, and a value the schema refuses fails this job for good.
+	 *
+	 * Only the children of this very job answer, and only those the asked
+	 * definition ran: two definitions sharing a queue stay apart. A job that is
+	 * no part of a flow reads empty, and touches Redis for nothing.
+	 */
+	readonly children: <Result extends StandardSchemaV1 | undefined>(
+		definition: JobDefinition<StandardSchemaV1, string, Result>,
+	) => Promise<(Result extends StandardSchemaV1 ? StandardSchemaV1.InferOutput<Result> : unknown)[]>
+	/**
 	 * Aborts when the job's `timeoutMs` expires, when `jobs.cancel(id)` reaches
 	 * this job, and when `close({ timeoutMs })` runs out of patience during a
 	 * shutdown. `signal.reason` tells the three apart: a shutdown aborts with a

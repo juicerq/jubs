@@ -71,7 +71,7 @@ The process that claims envelopes from the outbox, delivers them to the queue, a
 _Avoid_: Publisher, dispatcher
 
 **Origin**:
-What caused a job to exist: a direct call, its own schedule, a parent flow, or the relay.
+What caused a job to exist: a direct call, its own schedule, a flow, or the relay.
 
 **Driver**:
 The storage a client talks to — Redis in production, memory in tests.

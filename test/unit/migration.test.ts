@@ -306,6 +306,7 @@ describe("a versioned job over the memory driver", () => {
 describe("replaying a dead job of another version", () => {
 	function buryOne(driver: MemoryDriver, envelope: Envelope): Promise<void> {
 		return driver.dead.bury("crm", {
+			jobId: "crm:1",
 			envelope,
 			error: { name: "Error", message: "the contact was refused" },
 			reason: "attempts_exhausted",

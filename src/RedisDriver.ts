@@ -3,6 +3,8 @@ import {
 	type ConnectionOptions,
 	type DeduplicationOptions,
 	DelayedError,
+	type FlowJobNode,
+	FlowProducer,
 	type Job,
 	type JobSchedulerTemplateOptions,
 	type JobsOptions,
@@ -15,14 +17,26 @@ import {
 import { CANCEL_MARK_TTL_MS, type RunningDelivery } from "@/Cancellation"
 import { type DeadEntry, deadQueueName } from "@/Dead"
 import type { Delivery, ResolvedUnique } from "@/Delivery"
-import type { CancelResult, ConsumeRequest, JobDriver, JobState, ScheduleUpsert } from "@/Driver"
+import type {
+	CancelResult,
+	ChildFailure,
+	ChildResult,
+	ConsumeRequest,
+	FlowNode,
+	FlowState,
+	JobDriver,
+	JobState,
+	ScheduleUpsert,
+} from "@/Driver"
 import { type Envelope, readEnvelope } from "@/Envelope"
+import { FLOW_ID_MARKER } from "@/Flow"
 import {
 	type IdempotencyLease,
 	type IdempotencyStore,
 	type KeptResult,
 	LeaseHeldError,
 } from "@/Idempotency"
+import { composeJobId } from "@/JobId"
 import { ShutdownAbortError } from "@/Shutdown"
 
 const SCHEDULER_PREFIX = "juibs."
@@ -44,6 +58,8 @@ const COMPLETE_COMMAND = "juibsIdempotencyComplete"
 const RELEASE_COMMAND = "juibsIdempotencyRelease"
 
 const TAKE_CANCELLED_COMMAND = "juibsTakeCancelled"
+
+const READ_FLOW_COMMAND = "juibsReadFlow"
 
 const ACQUIRE_LUA = `
 local current = redis.call("GET", KEYS[1])
@@ -103,6 +119,30 @@ for index = 1, #ARGV, 2 do
 end
 
 return taken
+`
+
+/**
+ * Reads what the children of one flow job settled into, in one round trip.
+ *
+ * The two hashes BullMQ keeps on a parent are both keyed by the child's full
+ * job key, and neither holds the child's job name, so the name is read off each
+ * child's own hash inside the same script. Reading it here is what keeps the
+ * whole state one call instead of one call per child.
+ */
+const READ_FLOW_LUA = `
+local processed = redis.call("HGETALL", KEYS[1] .. ":processed")
+local failed = redis.call("HGETALL", KEYS[1] .. ":failed")
+local names = {}
+
+for index = 1, #processed, 2 do
+  names[#names + 1] = redis.call("HGET", processed[index], "name") or ""
+end
+
+for index = 1, #failed, 2 do
+  names[#names + 1] = redis.call("HGET", failed[index], "name") or ""
+end
+
+return { processed, failed, names }
 `
 
 function schedulerId(jobName: string): string {
@@ -207,6 +247,52 @@ export function toJobsOptions(delivery: Delivery): JobsOptions {
 	return { ...options, delay: delivery.delayMs }
 }
 
+/**
+ * Maps one node of a flow onto the job BullMQ adds, children and all.
+ *
+ * Every node but the root carries `ignoreDependencyOnFailure`, so a child that
+ * exhausts its attempts drops out of its parent's dependencies and leaves its
+ * reason in the parent's `:failed` hash. The parent then runs, finds the
+ * failure and is buried by the runtime — where a hook fires and a dead entry is
+ * kept. `failParentOnFailure` would fail the parent inside BullMQ's own worker,
+ * before the processor is called, so nothing would be buried and no burial
+ * would reach the grandparent.
+ */
+export function toFlowJob(node: FlowNode): FlowJobNode {
+	return {
+		name: node.envelope.name,
+		queueName: node.queue,
+		data: node.envelope,
+		opts: toJobsOptions(node.delivery),
+		children: node.children.map(toDependentFlowJob),
+	}
+}
+
+/**
+ * Every node but the root is stored under an id that starts with its own
+ * definition name.
+ *
+ * A completed child is swept by its `removeOnComplete`, and its hash goes with
+ * it, while the value it returned stays in its parent's `:processed`. The name
+ * is only in the hash, so a parent that outlives a swept child would read a
+ * result it cannot attribute and drop it — a short `children(definition)` with
+ * no error and no burial. The id is in the key of that hash entry, so a name
+ * carried there survives the sweep. The producer already assigns a random id to
+ * every node, so naming it ourselves changes nothing else.
+ */
+function toDependentFlowJob(node: FlowNode): FlowJobNode {
+	const job = toFlowJob(node)
+
+	return {
+		...job,
+		opts: {
+			...job.opts,
+			jobId: `${node.envelope.name}${FLOW_ID_MARKER}${randomUUID()}`,
+			ignoreDependencyOnFailure: true,
+		},
+	}
+}
+
 const JOB_STATES = {
 	waiting: "waiting",
 	prioritized: "waiting",
@@ -240,6 +326,24 @@ function lockedByAWorker(error: unknown): boolean {
 	return error instanceof Error && error.message.includes("locked by another worker")
 }
 
+/**
+ * What a cancellation Redis refused for a lock actually reached, read from the
+ * state the job is in once the refusal came back.
+ *
+ * A job that turned `active` under the cancellation holds its own lock, so its
+ * delivery is marked and aborted. A job in any other state does not: the lock
+ * belongs to a descendant of the flow it waits on, which `removeChildren` tried
+ * to delete. Nothing was cancelled then, and `aborting` would name a delivery
+ * that does not exist — the caller cancels the running child, or asks again.
+ */
+export function cancelUnderLock(state: JobState): CancelResult {
+	if (state === "active") {
+		return { outcome: "aborting" }
+	}
+
+	return { outcome: "children_running" }
+}
+
 async function openScriptClient(connection: ConnectionOptions): Promise<RedisClient> {
 	const handle = new Queue(SCRIPT_QUEUE, { connection, skipMetasUpdate: true })
 	const client = await handle.getBackend().client
@@ -249,6 +353,7 @@ async function openScriptClient(connection: ConnectionOptions): Promise<RedisCli
 	client.defineCommand(COMPLETE_COMMAND, { numberOfKeys: 1, lua: COMPLETE_LUA })
 	client.defineCommand(RELEASE_COMMAND, { numberOfKeys: 1, lua: RELEASE_LUA })
 	client.defineCommand(TAKE_CANCELLED_COMMAND, { numberOfKeys: 1, lua: TAKE_CANCELLED_LUA })
+	client.defineCommand(READ_FLOW_COMMAND, { numberOfKeys: 1, lua: READ_FLOW_LUA })
 
 	return client
 }
@@ -343,6 +448,88 @@ function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore 
 }
 
 /**
+ * Reads a child out of the job key its parent's hashes are keyed by. A job key
+ * is `<prefix>:<queueName>:<jobId>`, so the last two segments are the queue and
+ * the stored id.
+ */
+function readChildKey(key: string): { queue: string; storedId: string } {
+	const segments = key.split(":")
+
+	return { queue: segments.at(-2) ?? "", storedId: segments.at(-1) ?? "" }
+}
+
+/**
+ * What a child returned, as Redis kept it. A child whose handler returned
+ * nothing stored nothing readable, and reads back as `undefined` — the parse is
+ * our own for that very reason, since BullMQ's `getChildrenValues` throws on it.
+ */
+/**
+ * The definition a child ran, read off its own hash when Redis still holds it,
+ * and off its job id when the sweep already took the hash away.
+ *
+ * The hash stays the primary source on purpose. A flow already in flight when
+ * this rule shipped has children under plain uuids, which carry no name at all
+ * — dropping the hash read would lose exactly those, which is the very loss
+ * this guards against, only somewhere new.
+ */
+function childName(stored: unknown, storedId: string): string {
+	const name = String(stored ?? "")
+
+	if (name) {
+		return name
+	}
+
+	const cut = storedId.indexOf(FLOW_ID_MARKER)
+
+	return cut < 1 ? "" : storedId.slice(0, cut)
+}
+
+function childValue(stored: string): unknown {
+	try {
+		return JSON.parse(stored)
+	} catch {
+		return undefined
+	}
+}
+
+function hashEntries(reply: unknown): { key: string; value: string }[] {
+	const flat = Array.isArray(reply) ? reply : []
+
+	return flat.flatMap((_, index) =>
+		index % 2 === 0 ? [{ key: String(flat[index]), value: String(flat[index + 1]) }] : [],
+	)
+}
+
+export function readFlowState(reply: unknown): FlowState {
+	const [processed, failed, names] = Array.isArray(reply) ? reply : []
+	const done = hashEntries(processed)
+	const gone = hashEntries(failed)
+	const named: unknown[] = Array.isArray(names) ? names : []
+
+	const results: ChildResult[] = done.map((entry, index) => {
+		const { queue, storedId } = readChildKey(entry.key)
+
+		return {
+			queue,
+			name: childName(named[index], storedId),
+			value: childValue(entry.value),
+		}
+	})
+
+	const failures: ChildFailure[] = gone.map((entry, index) => {
+		const { queue, storedId } = readChildKey(entry.key)
+
+		return {
+			id: composeJobId(queue, storedId),
+			name: childName(named[done.length + index], storedId),
+			reason: entry.value,
+		}
+	})
+
+	return { results, failures }
+}
+
+/**
  * The prefix every cancellation mark of one queue is written under.
  *
  * The queue name sits in a hash tag, so every mark of one queue lands in one
@@ -406,6 +593,8 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 	const client = scriptClient(connection)
 	const idempotency = redisIdempotency(client)
 
+	let flows: FlowProducer | undefined
+
 	function queueFor(name: string): Queue {
 		const open = queues.get(name)
 
@@ -420,16 +609,34 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 		return queue
 	}
 
-	async function markRunningDelivery(queue: string, id: string): Promise<CancelResult> {
+	/**
+	 * Opens the one producer every flow is added through, the first time a flow
+	 * needs it.
+	 *
+	 * It takes the connection and the key prefix the queues take, so a flow lands
+	 * on the very queues `enqueue` writes to. Nothing closes it, because nothing
+	 * closes the queues either: the caller owns the connection they all share.
+	 */
+	function flowProducer(): FlowProducer {
+		flows ??= new FlowProducer({ connection })
+
+		return flows
+	}
+
+	async function cancelRefusedByALock(queue: string, id: string): Promise<CancelResult> {
 		const job = await queueFor(queue).getJob(id)
 
 		if (!job) {
 			return { outcome: "unknown_job" }
 		}
 
-		await requestCancel(client, queue, { id, attemptsStarted: job.attemptsStarted })
+		const reached = cancelUnderLock(JOB_STATES[await job.getState()])
 
-		return { outcome: "aborting" }
+		if (reached.outcome === "aborting") {
+			await requestCancel(client, queue, { id, attemptsStarted: job.attemptsStarted })
+		}
+
+		return reached
 	}
 
 	return {
@@ -514,7 +721,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 						throw refused
 					}
 
-					return markRunningDelivery(queue, id)
+					return cancelRefusedByALock(queue, id)
 				},
 			)
 		},
@@ -572,6 +779,27 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 						throw refusedSchedule(schedule, error)
 					})
 			}
+		},
+
+		flow: {
+			async enqueue(root) {
+				const tree = await flowProducer().add(toFlowJob(root))
+				const id = tree?.job.id
+
+				if (!id) {
+					throw new Error(`juibs: redis stored the flow "${root.envelope.name}" without an id`)
+				}
+
+				return { id }
+			},
+
+			async read(queue, id) {
+				const reply: unknown = await (await client()).runCommand(READ_FLOW_COMMAND, [
+					queueFor(queue).toKey(id),
+				])
+
+				return readFlowState(reply)
+			},
 		},
 
 		dead: {

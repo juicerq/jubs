@@ -84,6 +84,12 @@ export interface MemoryDriver extends JobDriver {
  * Per-queue `concurrency` is accepted and ignored — jobs run inline, one at a
  * time. A `limiter` throws, for the same reason a delay does.
  *
+ * A flow throws on enqueue. Jobs run inline here, so nothing ever reaches
+ * `waiting-children`, and a parent that ran before its children would agree
+ * with your test and disagree with production. `context.children(definition)`
+ * therefore reads empty for every job this driver delivers: test a flow against
+ * `redisDriver`.
+ *
  * Starting a queue whose definitions declare a schedule throws, because a
  * recurrence is nothing but a clock: an inline imitation would fire when your
  * test asked it to and never again in production. A started queue that declares
@@ -404,6 +410,16 @@ export function memoryDriver(): MemoryDriver {
 			}
 
 			throw unsupported("schedule")
+		},
+
+		flow: {
+			async enqueue() {
+				throw unsupported("flow")
+			},
+
+			async read() {
+				return { results: [], failures: [] }
+			},
 		},
 
 		dead: {

@@ -13,11 +13,16 @@ export {
 export { DELIVERY_DEFAULTS, type Delivery, type DeliveryPolicy } from "@/Delivery"
 export type {
 	CancelResult,
+	ChildFailure,
+	ChildResult,
 	ConsumeRequest,
 	Consumer,
 	DeadStore,
 	EnqueuedJob,
 	EnqueueRequest,
+	FlowNode,
+	FlowState,
+	FlowStore,
 	JobDelivery,
 	JobDriver,
 	JobSnapshot,
@@ -29,6 +34,7 @@ export type {
 } from "@/Driver"
 export type { Envelope, TraceContext } from "@/Envelope"
 export type { SerializedError } from "@/Failure"
+export { child, type FlowChild, type FlowChildren } from "@/Flow"
 export type { JobEvent, JobFailureEvent, JobHooks } from "@/Hooks"
 export { type IdempotencyStore, LeaseHeldError } from "@/Idempotency"
 export { type PayloadMigration, VersionAheadError } from "@/Migration"

@@ -3,6 +3,7 @@ import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
 import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type { CancelResult, EnqueuedJob, JobDriver, JobSnapshot, RetryResult } from "@/Driver"
+import { child, composeFlow, type FlowChildren } from "@/Flow"
 import type { JobHooks } from "@/Hooks"
 import { composeJobId, readJobId } from "@/JobId"
 import { migrateEnvelope } from "@/Migration"
@@ -22,6 +23,26 @@ export interface JobsClient {
 	enqueue<Payload extends StandardSchemaV1>(
 		definition: JobDefinition<Payload>,
 		data: StandardSchemaV1.InferInput<Payload>,
+	): Promise<EnqueuedJob>
+	/**
+	 * Enqueues a job that waits on the children `child(...)` describes, nesting to
+	 * any depth and across queues, and gives back the id of the parent — the same
+	 * form `enqueue` gives back.
+	 *
+	 * Inside the parent's handler, `context.children(definition)` reads what those
+	 * children returned. A child that fails every attempt does not fail the parent
+	 * inside Redis: the parent runs, finds the failure, and is buried with the
+	 * reason `child_dead`, which buries its own parent in turn.
+	 *
+	 * A definition declaring `unique` cannot take part in a flow, at any position,
+	 * and a definition declaring `idempotencyKey` cannot be a node that waits on
+	 * children — its children are part of its input, and its payload alone does
+	 * not name the run.
+	 */
+	flow<Payload extends StandardSchemaV1>(
+		definition: JobDefinition<Payload>,
+		data: StandardSchemaV1.InferInput<Payload>,
+		options?: FlowChildren,
 	): Promise<EnqueuedJob>
 	start<Queue extends string>(
 		handlers: JobHandler<Queue>[],
@@ -154,6 +175,12 @@ export function createJobs(config: JobsConfig): JobsClient {
 					)
 				}
 
+				if (entry.envelope.origin === "flow") {
+					throw new Error(
+						`juibs: the dead job "${id}" is part of a flow, and replaying it would enqueue "${entry.envelope.name}" with no children at all — it would run over an empty result set and complete green. Put the flow back together instead: jobs.retry(id) on each child that failed, which returns it to its parent's dependencies, then jobs.retry("${entry.jobId}") on the parent. The ids of the children that failed are named in this entry's error. Both dead records stay where they are — drop them with jobs.dead.discard(id).`,
+					)
+				}
+
 				const definition = config.definitions?.find(
 					(candidate) => candidate.name === entry.envelope.name,
 				)
@@ -198,6 +225,13 @@ export function createJobs(config: JobsConfig): JobsClient {
 				envelope: { v: payloadVersion(definition), name: definition.name, data, origin: "direct" },
 				delivery: resolveDelivery(definition, validated),
 			})
+
+			return { id: composeJobId(definition.queue, enqueued.id) }
+		},
+
+		async flow(definition, data, options) {
+			const root = await composeFlow(child(definition, data, options))
+			const enqueued = await config.driver.flow.enqueue(root)
 
 			return { id: composeJobId(definition.queue, enqueued.id) }
 		},
