@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
-import { createJobs, defineHandler, defineJob } from "@/index"
+import { createJobs, defineHandler, defineJob, type JobHandler } from "@/index"
 import { DEFAULT_CONCURRENCY } from "@/Runtime"
 import { memoryDriver } from "@/testing/index"
 import { recordingDriver } from "./support/RecordingDriver"
@@ -46,15 +46,28 @@ describe("per-queue tuning", () => {
 
 	test("refuses tuning aimed at a queue no handler starts, naming it", async () => {
 		const driver = recordingDriver()
+		const handlers: JobHandler[] = [defineHandler(sendEmail, async () => {})]
 
 		const failure = await createJobs({ driver })
-			.start([defineHandler(sendEmail, async () => {})], {
-				queues: { reprots: { concurrency: 2 } },
-			})
+			.start(handlers, { queues: { reprots: { concurrency: 2 } } })
 			.catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("reprots")
 		expect((failure as Error).message).toContain("mail")
+		expect(driver.consuming).toEqual([])
+	})
+
+	test("refuses tuning whose queue name is only known at runtime", async () => {
+		const driver = recordingDriver()
+		const queue: string = ["rep", "rots"].join("")
+
+		const failure = await createJobs({ driver })
+			.start([defineHandler(sendEmail, async () => {})], {
+				queues: { [queue]: { concurrency: 2 } },
+			})
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("reprots")
 		expect(driver.consuming).toEqual([])
 	})
 

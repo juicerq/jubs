@@ -22,7 +22,10 @@ export interface JobsClient {
 		definition: JobDefinition<Payload>,
 		data: StandardSchemaV1.InferInput<Payload>,
 	): Promise<EnqueuedJob>
-	start(handlers: JobHandler[], options?: StartOptions): Promise<JobsRuntime>
+	start<Queue extends string>(
+		handlers: JobHandler<Queue>[],
+		options?: StartOptions<Queue>,
+	): Promise<JobsRuntime>
 	readonly dead: {
 		list(queue: string): Promise<DeadJob[]>
 		replay(id: string): Promise<EnqueuedJob>

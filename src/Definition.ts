@@ -26,9 +26,12 @@ export interface HandlerContext {
 	readonly signal: AbortSignal
 }
 
-export interface JobDefinition<Payload extends StandardSchemaV1 = StandardSchemaV1> {
+export interface JobDefinition<
+	Payload extends StandardSchemaV1 = StandardSchemaV1,
+	Queue extends string = string,
+> {
 	readonly name: string
-	readonly queue: string
+	readonly queue: Queue
 	readonly payload: Payload
 	readonly version?: number
 	readonly migrations?: Readonly<Record<number, PayloadMigration>>
@@ -38,8 +41,8 @@ export interface JobDefinition<Payload extends StandardSchemaV1 = StandardSchema
 	readonly timeoutMs?: number
 }
 
-export interface JobDefinitionInput<Payload extends StandardSchemaV1>
-	extends Omit<JobDefinition<Payload>, "delivery" | "schedule" | "idempotencyKey"> {
+export interface JobDefinitionInput<Payload extends StandardSchemaV1, Queue extends string = string>
+	extends Omit<JobDefinition<Payload, Queue>, "delivery" | "schedule" | "idempotencyKey"> {
 	readonly delivery?: DeliveryPolicy<StandardSchemaV1.InferOutput<Payload>>
 	readonly schedule?: Schedule<StandardSchemaV1.InferInput<Payload>>
 	readonly idempotencyKey?: (data: StandardSchemaV1.InferOutput<Payload>) => string
@@ -49,8 +52,8 @@ export function payloadVersion(definition: JobDefinition): number {
 	return definition.version ?? DEFAULT_PAYLOAD_VERSION
 }
 
-export interface JobHandler {
-	readonly definition: JobDefinition
+export interface JobHandler<Queue extends string = string> {
+	readonly definition: JobDefinition<StandardSchemaV1, Queue>
 	readonly run: (data: unknown, context: HandlerContext) => Promise<unknown>
 }
 
@@ -111,9 +114,9 @@ function assertTimeout(definition: Pick<JobDefinition, "name" | "timeoutMs">): v
 	)
 }
 
-export function defineJob<Payload extends StandardSchemaV1>(
-	input: JobDefinitionInput<Payload>,
-): JobDefinition<Payload> {
+export function defineJob<Payload extends StandardSchemaV1, const Queue extends string = string>(
+	input: JobDefinitionInput<Payload, Queue>,
+): JobDefinition<Payload, Queue> {
 	assertVersioning(input)
 	assertTimeout(input)
 
@@ -134,9 +137,9 @@ export function defineJob<Payload extends StandardSchemaV1>(
 	return { ...definition, delivery: input.delivery as DeliveryPolicy }
 }
 
-export function defineHandler<Payload extends StandardSchemaV1>(
-	definition: JobDefinition<Payload>,
+export function defineHandler<Payload extends StandardSchemaV1, Queue extends string = string>(
+	definition: JobDefinition<Payload, Queue>,
 	run: HandlerRun<Payload>,
-): JobHandler {
+): JobHandler<Queue> {
 	return { definition, run: run as JobHandler["run"] }
 }

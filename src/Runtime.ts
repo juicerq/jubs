@@ -35,8 +35,8 @@ export interface QueueTuning {
 	readonly limiter?: QueueLimiter
 }
 
-export interface StartOptions {
-	readonly queues?: Record<string, QueueTuning>
+export interface StartOptions<Queue extends string = string> {
+	readonly queues?: Partial<Record<Queue, QueueTuning>>
 }
 
 export interface CloseOptions {
