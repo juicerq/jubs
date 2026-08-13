@@ -37,6 +37,13 @@ export interface CompleteRequest extends ReleaseRequest {
 }
 
 /**
+ * What a `forget` reached. `forgotten` deleted a complete key, `not_found` met
+ * no key at all, and `running` met a key a delivery holds right now — which is
+ * refused, and deletes nothing.
+ */
+export type ForgetOutcome = "forgotten" | "not_found" | "running"
+
+/**
  * Keeps the three states an idempotency key can be in: absent, held by a
  * running delivery under a lease that expires, and complete with a kept result.
  *
@@ -45,12 +52,20 @@ export interface CompleteRequest extends ReleaseRequest {
  * still holds that token. A worker whose lease expired under a running handler
  * therefore cannot renew, finish or free the lease a second worker took after
  * it — without the token it would break the very guarantee the lease exists for.
+ *
+ * `forget` carries no token, because whoever asks for it is an operator, not
+ * the delivery that took the key. That is why it refuses a key a delivery
+ * holds: deleting a held lease would take it from under a running handler, and
+ * the next delivery would find the key free and run a second body beside the
+ * first — the very double execution the lease exists to prevent. A complete key
+ * holds no running body, so that one is deleted.
  */
 export interface IdempotencyStore {
 	acquire(request: AcquireRequest): Promise<IdempotencyLease>
 	renew(request: RenewRequest): Promise<void>
 	complete(request: CompleteRequest): Promise<void>
 	release(request: ReleaseRequest): Promise<void>
+	forget(key: string): Promise<ForgetOutcome>
 }
 
 /**

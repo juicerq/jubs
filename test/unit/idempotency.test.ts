@@ -1,6 +1,7 @@
 import { describe, expect, jest, test } from "bun:test"
 import { type } from "arktype"
 import {
+	IDEMPOTENCY_LEASE_MS,
 	IDEMPOTENCY_MAX_RESULT_BYTES,
 	IDEMPOTENCY_RENEW_MS,
 	idempotencyKeyFor,
@@ -12,6 +13,7 @@ import {
 	type JobDelivery,
 	type JobFailureEvent,
 	LeaseHeldError,
+	PayloadError,
 } from "@/index"
 import { memoryDriver } from "@/testing/index"
 import { recordingDriver } from "./support/RecordingDriver"
@@ -300,6 +302,105 @@ describe("idempotency", () => {
 		await jobs.enqueue(chargeCard, { orderId: "order-1", cents: 500 })
 
 		expect(await driver.drain()).toBe(2)
+		expect(charged).toEqual([500])
+	})
+})
+
+describe("forgetting an idempotency key", () => {
+	test("a forgotten key makes the next delivery run the handler again", async () => {
+		const driver = memoryDriver()
+		const charged: number[] = []
+
+		const jobs = createJobs({ driver })
+
+		await jobs.start([
+			defineHandler(chargeCard, async (data) => {
+				charged.push(data.cents)
+			}),
+		])
+
+		await jobs.enqueue(chargeCard, { orderId: "order-1", cents: 500 })
+		await jobs.enqueue(chargeCard, { orderId: "order-1", cents: 500 })
+		await driver.drain()
+
+		expect(charged).toEqual([500])
+
+		const forgotten = await jobs.idempotency.forget(chargeCard, { orderId: "order-1", cents: 500 })
+
+		await jobs.enqueue(chargeCard, { orderId: "order-1", cents: 500 })
+		await driver.drain()
+
+		expect(forgotten.outcome).toBe("forgotten")
+		expect(charged).toEqual([500, 500])
+	})
+
+	test("a key nothing kept reads not_found", async () => {
+		const jobs = createJobs({ driver: memoryDriver() })
+
+		const forgotten = await jobs.idempotency.forget(chargeCard, { orderId: "order-9", cents: 500 })
+
+		expect(forgotten.outcome).toBe("not_found")
+	})
+
+	test("a key a delivery holds is refused, and stays where it is", async () => {
+		const driver = memoryDriver()
+		const jobs = createJobs({ driver })
+
+		const held = await driver.idempotency.acquire({
+			key: keyOf("order-1"),
+			leaseMs: IDEMPOTENCY_LEASE_MS,
+		})
+
+		const refused = await jobs.idempotency.forget(chargeCard, { orderId: "order-1", cents: 500 })
+
+		const after = await driver.idempotency.acquire({
+			key: keyOf("order-1"),
+			leaseMs: IDEMPOTENCY_LEASE_MS,
+		})
+
+		expect(held.state).toBe("acquired")
+		expect(refused.outcome).toBe("running")
+		expect(after.state).toBe("held")
+	})
+
+	test("a definition that declares no idempotency key reads not_guarded", async () => {
+		const sendEmail = defineJob({
+			name: "email.send",
+			queue: "mail",
+			payload: type({ to: "string.email" }),
+		})
+
+		const jobs = createJobs({ driver: memoryDriver() })
+
+		const forgotten = await jobs.idempotency.forget(sendEmail, { to: "ada@example.com" })
+
+		expect(forgotten.outcome).toBe("not_guarded")
+	})
+
+	test("a payload the schema refuses fails the call and forgets nothing", async () => {
+		const driver = memoryDriver()
+		const charged: number[] = []
+
+		const jobs = createJobs({ driver })
+
+		await jobs.start([
+			defineHandler(chargeCard, async (data) => {
+				charged.push(data.cents)
+			}),
+		])
+
+		await jobs.enqueue(chargeCard, { orderId: "order-1", cents: 500 })
+		await driver.drain()
+
+		const failure = await jobs.idempotency
+			// @ts-expect-error `cents` is a number in the payload schema
+			.forget(chargeCard, { orderId: "order-1", cents: "500" })
+			.catch((error: unknown) => error)
+
+		await jobs.enqueue(chargeCard, { orderId: "order-1", cents: 500 })
+		await driver.drain()
+
+		expect(failure).toBeInstanceOf(PayloadError)
 		expect(charged).toEqual([500])
 	})
 })

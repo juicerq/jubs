@@ -106,6 +106,10 @@ export interface MemoryDriver extends JobDriver {
  * to be rescheduled, which needs a clock, so it throws instead: test a held
  * lease, an expired lease and a killed worker against `redisDriver`.
  *
+ * Forgetting a key is real here too, because it depends on no clock either: a
+ * key some delivery holds is refused and stays where it is, a complete key is
+ * deleted, and a key nothing kept reads absent.
+ *
  * It keeps every job it records, so `jobs.get` and `jobs.retry` answer for real.
  * A job it keeps is `waiting`, `active`, `completed` or `failed` — the four states
  * an inline run passes through — and never `delayed`, `waiting_children` or
@@ -273,6 +277,14 @@ export function memoryDriver(): MemoryDriver {
 			}
 
 			leased.delete(key)
+		},
+
+		async forget(key) {
+			if (leased.has(key)) {
+				return "running"
+			}
+
+			return kept.delete(key) ? "forgotten" : "not_found"
 		},
 	}
 

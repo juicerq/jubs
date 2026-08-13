@@ -305,6 +305,55 @@ describe("idempotency over redis", () => {
 		await inspectorConnection.del(startedKey, finishedKey)
 	}, 60_000)
 
+	test("forgetting a key a delivery holds is refused, and the key stays held", async () => {
+		const settleInvoice = defineJob({
+			name: scoped("billing.forget"),
+			queue: scoped("jubs.test.idem.forget"),
+			payload: type({ invoiceId: "string" }),
+			idempotencyKey: (data) => data.invoiceId,
+		})
+
+		const queue = inspect(settleInvoice.queue)
+		await scrub(queue)
+
+		const lease = leaseKey(settleInvoice.name, "for-1")
+		await inspectorConnection.del(lease)
+
+		const jobs = createJobs({ driver: redisDriver(workerConnection) })
+		const ran: string[] = []
+		const holding = Promise.withResolvers<void>()
+
+		const runtime = await jobs.start([
+			defineHandler(settleInvoice, async (data) => {
+				ran.push(data.invoiceId)
+
+				await holding.promise
+
+				return { receipt: "receipt-for-1" }
+			}),
+		])
+
+		const delivery = await jobs.enqueue(settleInvoice, { invoiceId: "for-1" })
+		await waitFor(() => ran.length === 1)
+
+		const refused = await jobs.idempotency.forget(settleInvoice, { invoiceId: "for-1" })
+
+		expect(refused.outcome).toBe("running")
+		expect(await inspectorConnection.get(lease)).toStartWith(RUNNING_PREFIX)
+
+		holding.resolve()
+		await waitFor(async () => !!(await queue.getJob(storedId(delivery)))?.finishedOn)
+
+		const forgotten = await jobs.idempotency.forget(settleInvoice, { invoiceId: "for-1" })
+		const again = await jobs.idempotency.forget(settleInvoice, { invoiceId: "for-1" })
+
+		expect(forgotten.outcome).toBe("forgotten")
+		expect(again.outcome).toBe("not_found")
+		expect(await inspectorConnection.get(lease)).toBeNull()
+
+		await runtime.close()
+	})
+
 	test("a result above the byte limit keeps the marker alone, so the second delivery returns nothing", async () => {
 		const renderReport = defineJob({
 			name: scoped("reports.render"),

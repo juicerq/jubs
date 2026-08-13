@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
 import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -11,6 +12,7 @@ const workerConnection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null })
 const inspectorConnection = new IORedis(REDIS_URL)
 
 const opened: Queue[] = []
+const leased: string[] = []
 
 function inspect(queue: string): Queue {
 	const handle = new Queue(queue, { connection: inspectorConnection })
@@ -18,6 +20,34 @@ function inspect(queue: string): Queue {
 	opened.push(handle)
 
 	return handle
+}
+
+function leaseKey(jobName: string, key: string): string {
+	const lease = `${IDEMPOTENCY_KEY_PREFIX}${jobName}:${key}`
+
+	leased.push(lease)
+
+	return lease
+}
+
+async function keySettled(lease: string): Promise<boolean> {
+	const stored = await inspectorConnection.get(lease)
+
+	return !!stored && !stored.startsWith(RUNNING_PREFIX)
+}
+
+async function waitFor(reached: () => boolean | Promise<boolean>): Promise<void> {
+	const deadline = Date.now() + 8_000
+
+	while (Date.now() < deadline) {
+		if (await reached()) {
+			return
+		}
+
+		await Bun.sleep(25)
+	}
+
+	throw new Error("the executions expected by this test did not arrive in time")
 }
 
 async function waitForFinished(queue: Queue, id: string): Promise<Job> {
@@ -57,6 +87,11 @@ async function freshQueues(queue: string): Promise<{ live: Queue; dead: Queue }>
 
 afterAll(async () => {
 	await Promise.all(opened.map((queue) => queue.obliterate({ force: true })))
+
+	if (leased.length) {
+		await inspectorConnection.del(...leased)
+	}
+
 	await Promise.all(opened.map((queue) => queue.close()))
 	await Promise.all([workerConnection.quit(), inspectorConnection.quit()])
 })
@@ -191,6 +226,111 @@ describe("dead queue over redis", () => {
 		expect(replayed.id).not.toBe(enqueued.id)
 		expect(await charged.promise).toEqual({ cents: 500 })
 		expect(await jobs.dead.list(chargeCard.queue)).toEqual([])
+
+		await runtime.close()
+	})
+
+	test("replays a job buried on its deadline whose body completed its key, and runs the handler", async () => {
+		const settlePayment = defineJob({
+			name: scoped("billing.replay-forget"),
+			queue: scoped("jubs.test.dead-forget"),
+			payload: type({ paymentId: "string" }),
+			idempotencyKey: (data) => data.paymentId,
+			delivery: { attempts: 1 },
+			timeoutMs: 50,
+		})
+
+		const { live } = await freshQueues(settlePayment.queue)
+
+		const lease = leaseKey(settlePayment.name, "pay-1")
+		await inspectorConnection.del(lease)
+
+		const jobs = createJobs({
+			driver: redisDriver(workerConnection),
+			deadQueues: [settlePayment.queue],
+			definitions: [settlePayment],
+		})
+
+		const settled: string[] = []
+
+		const runtime = await jobs.start([
+			defineHandler(settlePayment, async (data) => {
+				settled.push(data.paymentId)
+
+				await Bun.sleep(300)
+
+				return { receipt: "receipt-pay-1" }
+			}),
+		])
+
+		const enqueued = await jobs.enqueue(settlePayment, { paymentId: "pay-1" })
+
+		await waitForFinished(live, storedId(enqueued))
+		await waitFor(() => keySettled(lease))
+
+		const [dead] = await jobs.dead.list(settlePayment.queue)
+
+		expect(dead?.reason).toBe("attempts_exhausted")
+		expect(settled).toEqual(["pay-1"])
+
+		await jobs.dead.replay(dead?.id ?? "")
+
+		await waitFor(() => settled.length === 2)
+		await waitFor(() => keySettled(lease))
+
+		expect(settled).toEqual(["pay-1", "pay-1"])
+
+		await runtime.close()
+	})
+
+	test("refuses to replay a job whose key the body that outlived it still holds", async () => {
+		const settlePayment = defineJob({
+			name: scoped("billing.replay-held"),
+			queue: scoped("jubs.test.dead-held"),
+			payload: type({ paymentId: "string" }),
+			idempotencyKey: (data) => data.paymentId,
+			delivery: { attempts: 1 },
+			timeoutMs: 50,
+		})
+
+		const { live } = await freshQueues(settlePayment.queue)
+
+		const lease = leaseKey(settlePayment.name, "held-1")
+		await inspectorConnection.del(lease)
+
+		const jobs = createJobs({
+			driver: redisDriver(workerConnection),
+			deadQueues: [settlePayment.queue],
+			definitions: [settlePayment],
+		})
+
+		const settled: string[] = []
+
+		const runtime = await jobs.start([
+			defineHandler(settlePayment, async (data) => {
+				settled.push(data.paymentId)
+
+				await Bun.sleep(1_500)
+
+				return { receipt: "receipt-held-1" }
+			}),
+		])
+
+		const enqueued = await jobs.enqueue(settlePayment, { paymentId: "held-1" })
+
+		await waitForFinished(live, storedId(enqueued))
+
+		expect(await inspectorConnection.get(lease)).toStartWith(RUNNING_PREFIX)
+
+		const [dead] = await jobs.dead.list(settlePayment.queue)
+		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("held by a delivery running right now")
+		expect(await jobs.dead.list(settlePayment.queue)).toHaveLength(1)
+		expect(await live.getJobCountByTypes("waiting", "delayed", "active")).toBe(0)
+		expect(settled).toEqual(["held-1"])
+
+		await waitFor(() => keySettled(lease))
 
 		await runtime.close()
 	})

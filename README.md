@@ -393,7 +393,39 @@ Hooks see a rescheduled delivery as a start with no end. `onStart` fires before 
 
 A scheduled job reaches exactly-once only through `idempotencyKey`. The occurrence a scheduler produces does not carry `unique`, as described above, so the key is the only exclusion left to it.
 
-The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result — as the JSON projection of it, the same one Redis gives back — and a failing handler releases the key. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
+### Forgetting a key
+
+A complete key holds its result for 24 hours, and every delivery of that payload inside the window skips the handler. `jobs.idempotency.forget(definition, data)` deletes the key, so the next delivery runs the work for real.
+
+Reach for it when the kept result is the wrong answer: a bug you fixed after the run, a handler that reported a success it did not have, a payload you want to run again on purpose. Clearing the queue does not do it — keys live under `jubs:idem:`, outside the `bull:<queue>:` namespace, so an `obliterate`, a purge from a Bull Board, a redeploy and a restart all leave them exactly where they were.
+
+```ts
+const forgotten = await jobs.idempotency.forget(chargeCard, { orderId: "ord_1", cents: 500 })
+
+if (forgotten.outcome === "running") {
+	console.log("a delivery holds that key right now — ask again once it ends")
+}
+```
+
+The payload is validated first, and the key is computed from what the schema gave back — the very key a delivery of that payload computes. An invalid payload fails the call and deletes nothing.
+
+```ts
+type ForgetResult =
+	| { outcome: "forgotten" }
+	| { outcome: "not_found" }
+	| { outcome: "running" }
+	| { outcome: "not_guarded" }
+```
+
+`not_guarded` is a definition that declares no `idempotencyKey`: there is no key to forget, which is an answer, not a failure.
+
+**Forgetting is refused while a delivery holds the key.** The outcome is `running` and nothing is deleted. What is stored then is a lease, not a result: a worker took that key and its handler is running under it right now. Deleting it would take the lease out from under that handler, and the next delivery would find the key absent, take it and run a second body beside the first — the double execution the lease exists to prevent. Every other operation on a key carries the token that names the one possession it means; `forget` is asked by an operator, not by the delivery that took the key, so it carries none, and refusing is the only safe move it has. Wait for the delivery to end and ask again: the key is complete by then, and forgetting it deletes a result, not a lease.
+
+**`dead.replay` forgets the key itself, before it enqueues.** That is the case which made this operation necessary. A job with both `timeoutMs` and `idempotencyKey` has its attempt and its body judged apart: the attempt fails on its deadline and the job is buried as `attempts_exhausted`, while the detached body keeps running and, when it returns, completes that job's key with its result. A replay that met that complete key would hand the kept result straight back and never call the handler — green, with nothing run.
+
+**A replay meeting a held key is refused.** Right after a `timeoutMs` burial that is the ordinary state, not a rare one: the body that outlived the attempt still holds the key, and jubs keeps renewing its lease for as long as that body lives, so the lease does not expire under it. A replay enqueued over it would be rescheduled onto the held key, and the delivery after that would hand back the result the body kept — with the dead record already dropped, so nothing would be left to replay. `dead.replay` throws instead, before it enqueues anything, which is what leaves the dead record where it is. Ask again once the body has ended: the key is complete by then, forgetting it deletes a result, and the job runs. So a replay either runs the handler or refuses — it never comes back green over work nobody did.
+
+The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result — as the JSON projection of it, the same one Redis gives back — and a failing handler releases the key. Forgetting a key is real here too, because it needs no clock either: a key a delivery holds is refused and stays where it is, and a complete key is deleted. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
 
 ## Scheduling
 
@@ -746,7 +778,9 @@ A replay ignores `unique`. The key of a dead job is often still taken — by the
 
 Replay and discard are at-least-once, like every delivery here. Two operators acting on the same dead id at the same moment can both succeed — two replays enqueue the job twice, and a replay racing a discard can do both. Nothing is lost, but a handler can run twice, so keep your handlers safe to repeat. `idempotencyKey` is the remedy — see [Idempotency](#idempotency).
 
-A replay can also run nothing at all, and still report success. It happens to a job whose definition has both `timeoutMs` and `idempotencyKey`. The attempt and the body are judged apart: the attempt failed on its deadline and the job was buried as `attempts_exhausted`, while the detached body kept running and, when it returned, completed that job's idempotency key with its result. A complete key keeps its result for **24 hours**. A replay inside that window meets the complete key, hands the kept result straight back and never calls the handler. Nothing runs, and the replay looks green. So before you trust such a replay, read the effects the handler was supposed to leave — a green replay is not proof it ran. After the 24 hours the key is gone and the next replay runs for real.
+One narrow window belongs to the replay itself: it forgets the key and then enqueues, so an enqueue Redis refuses leaves the key deleted with nothing enqueued. The dead record survives that failure and replaying again recovers the job — what does not come back is the guard, so another producer of the same payload inside the retention window runs the handler unguarded.
+
+**A replay forgets the job's idempotency key before it enqueues, and refuses while a delivery holds that key** — so it either runs the handler or throws, and never comes back green over work nobody did. The refusal is the ordinary answer right after a `timeoutMs` burial; the dead record survives it, so you replay again once the body has ended — see [Forgetting a key](#forgetting-a-key).
 
 Writing to the dead queue never changes a job's outcome. If Redis refuses the write, jubs reports it on `console.error` and the job still fails the way it would have.
 
@@ -816,7 +850,7 @@ If the process dies, the renewal stops with it and the lease expires on its own 
 
 Pairing the two is the remedy for the overlap described above. Reach for it on any job whose `timeoutMs` you expect to fire.
 
-One thing the pair does not reconcile is a job that dies while its body lives. The dead queue judges the **attempt**; the key follows the **body**. A job on its last attempt fails on its deadline and is buried as `attempts_exhausted`, and the body that outlived it then completes the key with its result. Both stand: the dead entry is there to replay, and the key is complete for 24 hours. Replaying that entry inside the window gives back the kept result and calls no handler — see [Dead queue](#dead-queue).
+One thing the pair does not reconcile is a job that dies while its body lives. The dead queue judges the **attempt**; the key follows the **body**. A job on its last attempt fails on its deadline and is buried as `attempts_exhausted`, and the body that outlived it then completes the key with its result. Both stand: the dead entry is there to replay, and the key is complete for 24 hours. `dead.replay` refuses while that body still holds the key, and forgets the key once the body has ended — so a replay runs the handler instead of handing back what the body kept — see [Dead queue](#dead-queue).
 
 ### `close`
 
@@ -1001,9 +1035,7 @@ A pause stops **fetching**, not the jobs already fetched: what is active when yo
 
 ### What these operations do not reach
 
-**Clearing a queue does not clear the idempotency keys.** Keys live under `jubs:idem:`, outside the `bull:<queue>:` namespace, so a `queue.obliterate()`, a purge from a Bull Board, a redeploy and a restart all leave them exactly where they were, for the 24 hours a complete key keeps its result. A job you enqueue again right after the purge can meet its own complete key, skip the handler in silence and hand back the result kept from the run before. There is no API to delete one today. Until there is, the way out is to wait the retention out, or to delete the key in Redis by hand.
-
-**A green replay is not proof the work ran.** A job with both `timeoutMs` and `idempotencyKey` can be buried on its deadline while its detached body keeps running and completes the key — and the replay of that entry hands back the kept result without calling the handler. It is described in full under [Dead queue](#dead-queue) and [`timeoutMs` with `idempotencyKey`](#timeoutms-with-idempotencykey).
+**Clearing a queue does not clear the idempotency keys.** They live outside the `bull:<queue>:` namespace, so a purge leaves them where they were, and a job you enqueue again right after it can meet its own complete key and skip the handler in silence. `jobs.idempotency.forget(definition, data)` is what deletes one — see [Forgetting a key](#forgetting-a-key).
 
 ### The memory driver
 

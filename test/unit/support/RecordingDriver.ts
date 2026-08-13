@@ -185,6 +185,14 @@ export function recordingDriver(): RecordingDriver {
 				released.push(key)
 				tokens.delete(key)
 			},
+
+			async forget(key) {
+				if (tokens.has(key)) {
+					return "running"
+				}
+
+				return kept.delete(key) ? "forgotten" : "not_found"
+			},
 		},
 
 		async reconcileSchedules(request) {

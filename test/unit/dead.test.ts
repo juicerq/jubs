@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
 import { createJobs, defineHandler, defineJob } from "@/index"
-import { memoryDriver } from "@/testing/index"
+import { type MemoryDriver, memoryDriver } from "@/testing/index"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -307,6 +307,72 @@ describe("inspecting and replaying a dead job", () => {
 		expect((failure as Error).message).toContain("children_short")
 		expect((failure as Error).message).toContain("jobs.enqueue(definition, data, awaits)")
 		expect(await jobs.dead.list("documents")).toHaveLength(1)
+	})
+
+	const settlePayment = defineJob({
+		name: "billing.settle",
+		queue: "billing",
+		payload: type({ paymentId: "string" }),
+		idempotencyKey: (data) => data.paymentId,
+		delivery: { attempts: 1 },
+		timeoutMs: 20,
+	})
+
+	/**
+	 * Buries the job on its deadline and gives back the client, with the handler's
+	 * body still running under the key it holds — the state every job that pairs
+	 * `timeoutMs` with `idempotencyKey` passes through on its way to being buried.
+	 */
+	async function buryOnItsDeadline(driver: MemoryDriver, bodyMs: number) {
+		const jobs = createJobs({
+			driver,
+			deadQueues: ["billing"],
+			definitions: [settlePayment],
+		})
+
+		const settled: string[] = []
+
+		await jobs.start([
+			defineHandler(settlePayment, async (data) => {
+				settled.push(data.paymentId)
+
+				await Bun.sleep(bodyMs)
+			}),
+		])
+
+		await jobs.enqueue(settlePayment, { paymentId: "pay-1" })
+		await driver.drain().catch(() => {})
+
+		return { jobs, settled }
+	}
+
+	test("replay forgets the idempotency key, so a job buried on its deadline runs again", async () => {
+		const driver = memoryDriver()
+		const { jobs, settled } = await buryOnItsDeadline(driver, 60)
+
+		await Bun.sleep(120)
+
+		const [dead] = await jobs.dead.list("billing")
+
+		expect(dead?.reason).toBe("attempts_exhausted")
+
+		await jobs.dead.replay(dead?.id ?? "")
+		await driver.drain().catch(() => {})
+
+		expect(settled).toEqual(["pay-1", "pay-1"])
+	})
+
+	test("replay refuses a job whose idempotency key a running body still holds", async () => {
+		const driver = memoryDriver()
+		const { jobs } = await buryOnItsDeadline(driver, 200)
+
+		const [dead] = await jobs.dead.list("billing")
+		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("held by a delivery running right now")
+		expect((failure as Error).message).toContain("This dead record stays where it is")
+		expect(await jobs.dead.list("billing")).toHaveLength(1)
+		expect(driver.enqueued(settlePayment)).toEqual([{ paymentId: "pay-1" }])
 	})
 
 	test("discard drops the dead job, and refuses an id no dead job answers to", async () => {

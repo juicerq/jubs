@@ -33,6 +33,7 @@ import type {
 import { type Envelope, readEnvelope } from "@/Envelope"
 import { ChildrenPendingError } from "@/Flow"
 import {
+	type ForgetOutcome,
 	type IdempotencyLease,
 	type IdempotencyStore,
 	type KeptResult,
@@ -58,6 +59,8 @@ const RENEW_COMMAND = "jubsIdempotencyRenew"
 const COMPLETE_COMMAND = "jubsIdempotencyComplete"
 
 const RELEASE_COMMAND = "jubsIdempotencyRelease"
+
+const FORGET_COMMAND = "jubsIdempotencyForget"
 
 const TAKE_CANCELLED_COMMAND = "jubsTakeCancelled"
 
@@ -105,6 +108,22 @@ if redis.call("GET", KEYS[1]) == ARGV[1] then
 end
 
 return 0
+`
+
+const FORGET_LUA = `
+local current = redis.call("GET", KEYS[1])
+
+if not current then
+  return 0
+end
+
+if string.sub(current, 1, string.len(ARGV[1])) == ARGV[1] then
+  return 2
+end
+
+redis.call("DEL", KEYS[1])
+
+return 1
 `
 
 const TAKE_CANCELLED_LUA = `
@@ -346,6 +365,7 @@ async function openScriptClient(connection: ConnectionOptions): Promise<RedisCli
 	client.defineCommand(RENEW_COMMAND, { numberOfKeys: 1, lua: RENEW_LUA })
 	client.defineCommand(COMPLETE_COMMAND, { numberOfKeys: 1, lua: COMPLETE_LUA })
 	client.defineCommand(RELEASE_COMMAND, { numberOfKeys: 1, lua: RELEASE_LUA })
+	client.defineCommand(FORGET_COMMAND, { numberOfKeys: 1, lua: FORGET_LUA })
 	client.defineCommand(TAKE_CANCELLED_COMMAND, { numberOfKeys: 1, lua: TAKE_CANCELLED_LUA })
 	client.defineCommand(READ_FLOW_COMMAND, { numberOfKeys: 1, lua: READ_FLOW_LUA })
 
@@ -387,6 +407,23 @@ export function readLease(reply: unknown, token: string): IdempotencyLease {
 }
 
 /**
+ * What the forget script reached, read out of the one number it replies with.
+ * The numbers are the script's own and end here: 1 deleted a complete key, 2
+ * met a key a delivery holds, and anything else met no key at all.
+ */
+function readForgotten(reply: unknown): ForgetOutcome {
+	if (reply === 1) {
+		return "forgotten"
+	}
+
+	if (reply === 2) {
+		return "running"
+	}
+
+	return "not_found"
+}
+
+/**
  * Keeps the three idempotency states in Redis, under the `jubs:idem:` prefix.
  *
  * Every operation is a Lua script registered once per client, so reading the key
@@ -399,6 +436,10 @@ export function readLease(reply: unknown, token: string): IdempotencyLease {
  * expired under a running handler cannot renew, finish or free the lease that a
  * second worker took after it. `complete` still writes when the key is gone,
  * because nobody holds it then.
+ *
+ * `forget` reads the same prefix instead of a token: a value carrying it is a
+ * lease some delivery holds, which it refuses, and anything else is a complete
+ * key, which it deletes.
  */
 function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore {
 	function redisKey(key: string): string {
@@ -437,6 +478,15 @@ function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore 
 
 		async release({ key, token }) {
 			await (await client()).runCommand(RELEASE_COMMAND, [redisKey(key), heldBy(token)])
+		},
+
+		async forget(key) {
+			const reply: unknown = await (await client()).runCommand(FORGET_COMMAND, [
+				redisKey(key),
+				RUNNING_PREFIX,
+			])
+
+			return readForgotten(reply)
 		},
 	}
 }

@@ -1,5 +1,5 @@
 export { CancelledError, type RunningDelivery } from "@/Cancellation"
-export { createJobs, type JobsClient, type JobsConfig } from "@/Client"
+export { createJobs, type ForgetResult, type JobsClient, type JobsConfig } from "@/Client"
 export type { DeadEntry, DeadJob, DeadReason } from "@/Dead"
 export {
 	type AwaitsInput,

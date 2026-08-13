@@ -11,11 +11,25 @@ import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type { CancelResult, EnqueuedJob, JobDriver, JobSnapshot, RetryResult } from "@/Driver"
 import { composeFlow, slotsOf } from "@/Flow"
 import type { JobHooks } from "@/Hooks"
+import { idempotencyKeyFor } from "@/Idempotency"
 import { composeJobId, readJobId } from "@/JobId"
 import { migrateEnvelope } from "@/Migration"
 import { validatePayload } from "@/Payload"
 import { type JobsRuntime, type StartOptions, startRuntime } from "@/Runtime"
 import { assertTimezone } from "@/Schedule"
+
+/**
+ * What forgetting an idempotency key reached. `forgotten` deleted a complete
+ * key, so the next delivery runs the handler again; `not_found` met no key at
+ * all; `running` met a key a delivery holds right now, which is refused and
+ * deletes nothing; `not_guarded` is a definition that declares no
+ * `idempotencyKey`, which names no key to forget.
+ */
+export type ForgetResult =
+	| { readonly outcome: "forgotten" }
+	| { readonly outcome: "not_found" }
+	| { readonly outcome: "running" }
+	| { readonly outcome: "not_guarded" }
 
 export interface JobsConfig {
 	readonly driver: JobDriver
@@ -94,8 +108,44 @@ export interface JobsClient {
 	resume(queue: string): Promise<void>
 	readonly dead: {
 		list(queue: string): Promise<DeadJob[]>
+		/**
+		 * Enqueues a dead job again from the envelope it was buried with, and drops
+		 * the dead record.
+		 *
+		 * The idempotency key that payload names is forgotten first, so the replay
+		 * runs the handler instead of replaying a result kept from an earlier run. A
+		 * job buried on its `timeoutMs` whose detached body then completed the key
+		 * would otherwise be replayed green with nothing run at all.
+		 *
+		 * A key a delivery holds right now is refused, and nothing is enqueued. That
+		 * is the normal state right after a `timeoutMs` burial, because the body
+		 * that outlived the attempt keeps the key held and renewed until it returns.
+		 * A replay enqueued over it would meet the held key, be rescheduled, and
+		 * then hand back the result that body kept — green, with nothing run, and
+		 * the dead record already dropped. Refusing before the enqueue is what
+		 * leaves the record where it is, for a replay that runs.
+		 */
 		replay(id: string): Promise<EnqueuedJob>
 		discard(id: string): Promise<void>
+	}
+	readonly idempotency: {
+		/**
+		 * Deletes the idempotency key one payload names, so the next delivery of
+		 * that payload runs the handler again instead of replaying the kept result.
+		 *
+		 * The payload is validated first, and the key is computed from what the
+		 * schema gave back — the very key a delivery of the same payload computes.
+		 * An invalid payload fails the call and deletes nothing.
+		 *
+		 * **A key a delivery holds right now is refused**, with the outcome
+		 * `running`. Deleting it would take the lease from under a running handler,
+		 * and the next delivery would find the key free and run a second body beside
+		 * the first. Wait for that delivery to end, then ask again.
+		 */
+		forget<Payload extends StandardSchemaV1>(
+			definition: JobDefinition<Payload>,
+			data: StandardSchemaV1.InferInput<Payload>,
+		): Promise<ForgetResult>
 	}
 }
 
@@ -136,6 +186,26 @@ function readLiveJobId(id: string): { queue: string; storedId: string } | undefi
 	}
 
 	return { queue, storedId }
+}
+
+/**
+ * Deletes the idempotency key a validated payload names, and says what that
+ * reached. A definition that declares no `idempotencyKey` names no key at all,
+ * which is an answer of its own rather than a failure — so a caller reads one
+ * union instead of guarding the definition first.
+ */
+async function forgetKey(
+	driver: JobDriver,
+	definition: JobDefinition,
+	validated: unknown,
+): Promise<ForgetResult["outcome"]> {
+	const key = idempotencyKeyFor(definition, validated)
+
+	if (!key) {
+		return "not_guarded"
+	}
+
+	return driver.idempotency.forget(key)
 }
 
 function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
@@ -210,6 +280,12 @@ export function createJobs(config: JobsConfig): JobsClient {
 				const migrated = await migrateEnvelope(definition, entry.envelope)
 				const validated = await validatePayload(definition, migrated)
 
+				if ((await forgetKey(config.driver, definition, validated)) === "running") {
+					throw new Error(
+						`jubs: the dead job "${id}" runs "${entry.envelope.name}", whose idempotency key is held by a delivery running right now — the body that outlived this job's last attempt is still going, and it completes that key with its own result when it returns. Replaying now would enqueue a job that meets the held key and is rescheduled, and the delivery after that would hand back the kept result without ever calling the handler: green, with nothing run. This dead record stays where it is — replay it again once that body has ended.`,
+					)
+				}
+
 				const enqueued = await config.driver.enqueue({
 					queue: definition.queue,
 					envelope: entry.envelope,
@@ -230,6 +306,14 @@ export function createJobs(config: JobsConfig): JobsClient {
 				}
 
 				throw new Error(`jubs: no dead job "${id}" is kept — it was replayed or discarded already`)
+			},
+		},
+
+		idempotency: {
+			async forget(definition, data) {
+				const validated = await validatePayload(definition, data)
+
+				return { outcome: await forgetKey(config.driver, definition, validated) }
 			},
 		},
 
