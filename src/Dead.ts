@@ -1,6 +1,10 @@
-import type { ChildResult } from "@/Driver"
+import { UnrecoverableError } from "bullmq"
+import { CancelledError } from "@/Cancellation"
+import type { ChildResult, JobDelivery } from "@/Driver"
 import type { Envelope } from "@/Envelope"
 import type { SerializedError } from "@/Failure"
+import { ChildDeadError, ChildrenShortError } from "@/Flow"
+import { VersionAheadError } from "@/Migration"
 
 /**
  * Why a job was buried.
@@ -64,4 +68,55 @@ export function liveQueueName(dead: string): string | undefined {
 	}
 
 	return dead.slice(0, -DEAD_SUFFIX.length)
+}
+
+/**
+ * The error a burial reads through, whether it is the one thrown or the cause
+ * of the `UnrecoverableError` that carries it — the same shape `ResultError`
+ * reaches a dead entry in.
+ */
+function raised(error: unknown): unknown {
+	if (error instanceof UnrecoverableError && error.cause !== undefined) {
+		return error.cause
+	}
+
+	return error
+}
+
+export function childDead(error: unknown): ChildDeadError | undefined {
+	const cause = raised(error)
+
+	if (cause instanceof ChildDeadError) {
+		return cause
+	}
+
+	return undefined
+}
+
+export function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
+	if (error instanceof CancelledError) {
+		return "cancelled"
+	}
+
+	if (error instanceof VersionAheadError) {
+		return "version_ahead"
+	}
+
+	if (childDead(error)) {
+		return "child_dead"
+	}
+
+	if (raised(error) instanceof ChildrenShortError) {
+		return "children_short"
+	}
+
+	if (error instanceof UnrecoverableError) {
+		return "unrecoverable"
+	}
+
+	if (delivery.attempt >= delivery.maxAttempts) {
+		return "attempts_exhausted"
+	}
+
+	return undefined
 }

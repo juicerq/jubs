@@ -5,9 +5,10 @@ import {
 	payloadVersion,
 } from "@/Definition"
 import { resolveDelivery } from "@/Delivery"
-import type { ChildResult, FlowChildNode, FlowNode, FlowState } from "@/Driver"
+import type { ChildResult, FlowChildNode, FlowNode, FlowState, FlowStore } from "@/Driver"
 import type { Envelope } from "@/Envelope"
 import { validatePayload } from "@/Payload"
+import { validateResult } from "@/Result"
 
 /**
  * One slot of a definition's `awaits`, read into the three things every step
@@ -157,6 +158,89 @@ export function childrenShort(
 	return new ChildrenShortError(
 		`jubs: the job "${definition.name}" waits on children, and a slot holds fewer than it was enqueued with — ${short.join("; ")}. Redis writes nothing when a child leaves its parent, so the missing ones were most likely cancelled with jobs.cancel(id) or removed with another job of this flow. The handler would read that slot short and complete green, so the job is buried instead: enqueue the flow again with jobs.enqueue(definition, data, awaits).`,
 	)
+}
+
+/**
+ * Reads what every slot of a definition settled into, and puts each value
+ * through the `result` schema of the definition that slot declares.
+ *
+ * It runs before the handler is called, not inside it, so a value a schema
+ * refuses fails this job for good with no handler code having run. Failing for
+ * good is the only honest outcome: the child is done, and running the parent
+ * again would read the very same value.
+ */
+async function childrenOf(
+	definition: JobDefinition,
+	state: FlowState,
+): Promise<Record<string, unknown>> {
+	const filled = await Promise.all(
+		slotsOf(definition).map(async (slot) => {
+			const values = await Promise.all(
+				state.results
+					.filter((result) => result.slot === slot.name)
+					.map((result) => validateResult(slot.definition, result.value)),
+			)
+
+			return [slot.name, slot.many ? values : values[0]] as const
+		}),
+	)
+
+	return Object.fromEntries(filled)
+}
+
+interface ChildrenRead {
+	readonly flow: FlowStore
+	readonly definition: JobDefinition
+	readonly envelope: Envelope
+	readonly queue: string
+	readonly id: string
+}
+
+/**
+ * What this job's children settled into, with every shape a handler must not
+ * see refused before the handler is reached.
+ *
+ * The read is gated on the definition, not on `envelope.origin`. Waiting on
+ * children is a property of the definition, and an envelope written by a
+ * schedule, or by a build where this job waited on nothing, is dispatched
+ * against the definition of today all the same — gating on the origin let every
+ * one of those run over empty slots and complete green. A definition that waits
+ * on nothing costs no round trip, which is every ordinary job.
+ *
+ * The order of the refusals is the order of what they mean. A child still in
+ * flight is not a lost child, so that delivery ends before the handler and the
+ * driver puts the job back to waiting on its children, spending no attempt. A
+ * child that failed for good is the burial that already existed. What is left is a slot that lost a child leaving no trace in Redis,
+ * which only the envelope can see.
+ */
+export async function childrenFor({
+	flow,
+	definition,
+	envelope,
+	queue,
+	id,
+}: ChildrenRead): Promise<Record<string, unknown>> {
+	if (slotsOf(definition).length === 0) {
+		return {}
+	}
+
+	const state = await flow.read(queue, id)
+
+	if (state.pending > 0) {
+		throw new ChildrenPendingError(definition, state.pending)
+	}
+
+	if (state.failures.length > 0) {
+		throw new ChildDeadError(definition, state)
+	}
+
+	const short = childrenShort(definition, envelope.slots, state)
+
+	if (short) {
+		throw short
+	}
+
+	return childrenOf(definition, state)
 }
 
 /**

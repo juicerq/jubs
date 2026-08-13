@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
-import { ChildDeadError, ChildrenPendingError } from "@/Flow"
+import { ChildDeadError, ChildrenPendingError, ChildrenShortError, childrenFor } from "@/Flow"
 import {
 	createJobs,
 	DELIVERY_DEFAULTS,
@@ -9,11 +9,11 @@ import {
 	defineJob,
 	type Envelope,
 	type FlowChildNode,
-	type FlowState,
 	type JobDefinition,
 } from "@/index"
 import { composeChildId, readChildSlot } from "@/JobId"
-import { type MemoryDriver, memoryDriver } from "@/testing/index"
+import { ResultError } from "@/Result"
+import { memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
 import { recordingDriver } from "./support/RecordingDriver"
 
@@ -462,6 +462,128 @@ const zipEnvelope: Envelope = {
 
 const manifestResult = { slot: "manifest", value: { count: 2 } }
 
+describe("childrenFor", () => {
+	test("gives an empty object for a definition that waits on nothing, and reads no flow", async () => {
+		const driver = recordingDriver()
+
+		const children = await childrenFor({
+			flow: driver.flow,
+			definition: fetchXmls,
+			envelope: { v: 1, name: "nfe.fetch-xmls", data: { page: 1 }, origin: "flow" },
+			queue: "nfe",
+			id: "1",
+		})
+
+		expect(children).toEqual({})
+		expect(driver.flowReads).toEqual([])
+	})
+
+	test("gives one value for a slot that holds one, and an array for a slot that holds many", async () => {
+		const driver = recordingDriver()
+
+		driver.keepFlowState({
+			results: [
+				{ slot: "xmls", value: { xml: "<a/>" } },
+				manifestResult,
+				{ slot: "xmls", value: { xml: "<b/>" } },
+			],
+			failures: [],
+			pending: 0,
+		})
+
+		const children = await childrenFor({
+			flow: driver.flow,
+			definition: zipExport,
+			envelope: { ...zipEnvelope, slots: { xmls: 2, manifest: 1 } },
+			queue: "nfe",
+			id: "1",
+		})
+
+		expect(children).toEqual({
+			xmls: [{ xml: "<a/>" }, { xml: "<b/>" }],
+			manifest: { count: 2 },
+		})
+		expect(driver.flowReads).toEqual([{ queue: "nfe", id: "1" }])
+	})
+
+	test("refuses the read while a child has not finished", async () => {
+		const driver = recordingDriver()
+
+		driver.keepFlowState({ results: [manifestResult], failures: [], pending: 1 })
+
+		const failure = await childrenFor({
+			flow: driver.flow,
+			definition: zipExport,
+			envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			queue: "nfe",
+			id: "1",
+		}).catch((error: unknown) => error)
+
+		expect(failure).toBeInstanceOf(ChildrenPendingError)
+		expect((failure as Error).message).toContain("1 of them has not finished yet")
+	})
+
+	test("refuses the read when a child failed every attempt, carrying what the others returned", async () => {
+		const driver = recordingDriver()
+
+		driver.keepFlowState({
+			results: [manifestResult],
+			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
+			pending: 0,
+		})
+
+		const failure = await childrenFor({
+			flow: driver.flow,
+			definition: zipExport,
+			envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			queue: "nfe",
+			id: "1",
+		}).catch((error: unknown) => error)
+
+		expect(failure).toBeInstanceOf(ChildDeadError)
+		expect((failure as Error).message).toContain('"xmls", which runs "nfe.fetch-xmls"')
+		expect((failure as ChildDeadError).results).toEqual([manifestResult])
+	})
+
+	test("refuses the read when a slot holds fewer children than it was enqueued with", async () => {
+		const driver = recordingDriver()
+
+		driver.keepFlowState({ results: [manifestResult], failures: [], pending: 0 })
+
+		const failure = await childrenFor({
+			flow: driver.flow,
+			definition: zipExport,
+			envelope: { ...zipEnvelope, slots: { xmls: 2, manifest: 1 } },
+			queue: "nfe",
+			id: "1",
+		}).catch((error: unknown) => error)
+
+		expect(failure).toBeInstanceOf(ChildrenShortError)
+		expect((failure as Error).message).toContain('"xmls" was given 2 and 0 arrived')
+	})
+
+	test("refuses a child value the result schema of its definition rejects", async () => {
+		const driver = recordingDriver()
+
+		driver.keepFlowState({
+			results: [{ slot: "xmls", value: { xml: 7 } }, manifestResult],
+			failures: [],
+			pending: 0,
+		})
+
+		const failure = await childrenFor({
+			flow: driver.flow,
+			definition: zipExport,
+			envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			queue: "nfe",
+			id: "1",
+		}).catch((error: unknown) => error)
+
+		expect(failure).toBeInstanceOf(ResultError)
+		expect((failure as Error).message).toContain("nfe.fetch-xmls")
+	})
+})
+
 describe("context.children", () => {
 	test("reads one value for a single slot and an array for a many slot", async () => {
 		const driver = recordingDriver()
@@ -677,55 +799,11 @@ describe("ChildDeadError", () => {
 	})
 })
 
-/**
- * The memory driver runs handlers inline and never reaches `waiting-children`,
- * so it holds no flow state and refuses to be asked for one. Its dead queue is
- * real, which is what a burial is read through, so the state a parent finds is
- * stated here.
- */
-function driverOnFlowState(state: FlowState): MemoryDriver {
-	const driver = memoryDriver()
-
-	return { ...driver, flow: { ...driver.flow, read: async () => state } }
-}
-
-describe("a child that failed every attempt", () => {
-	test("buries the parent with the reason child_dead and keeps what the others returned", async () => {
-		const driver = driverOnFlowState({
-			results: [manifestResult],
-			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
-			pending: 0,
-		})
-
-		const jobs = createJobs({ driver, deadQueues: ["nfe"] })
-		let ran = 0
-
-		await jobs.start([
-			defineHandler(zipExport, async () => {
-				ran += 1
-
-				return { url: "https://a.example/1" }
-			}),
-		])
-
-		await driver.enqueue({ queue: "nfe", envelope: zipEnvelope, delivery: DELIVERY_DEFAULTS })
-
-		const failure = await driver.runNext().catch((error: unknown) => error)
-		const buried = await jobs.dead.list("nfe")
-
-		expect(ran).toBe(0)
-		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain('"xmls", which runs "nfe.fetch-xmls"')
-		expect(buried).toHaveLength(1)
-		expect(buried[0]?.reason).toBe("child_dead")
-		expect(buried[0]?.children).toEqual([manifestResult])
-	})
-})
-
 describe("a child still in flight when the parent is delivered", () => {
 	test("ends the delivery before the handler, reporting no failed attempt and burying nothing", async () => {
-		const driver = driverOnFlowState({ results: [manifestResult], failures: [], pending: 1 })
+		const driver = recordingDriver()
 		const reported: string[] = []
+		const buried: string[] = []
 
 		const jobs = createJobs({
 			driver,
@@ -734,10 +812,15 @@ describe("a child still in flight when the parent is delivered", () => {
 				onAttemptFailed: (event) => {
 					reported.push(event.name)
 				},
+				onDead: (event) => {
+					buried.push(event.name)
+				},
 			},
 		})
 
 		let ran = 0
+
+		driver.keepFlowState({ results: [manifestResult], failures: [], pending: 1 })
 
 		await jobs.start([
 			defineHandler(zipExport, async () => {
@@ -747,68 +830,82 @@ describe("a child still in flight when the parent is delivered", () => {
 			}),
 		])
 
-		await driver.enqueue({
-			queue: "nfe",
-			envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
-			delivery: DELIVERY_DEFAULTS,
-		})
-
-		const failure = await driver.runNext().catch((error: unknown) => error)
+		const failure = await driver
+			.deliver("nfe", {
+				id: "1",
+				attempt: 1,
+				maxAttempts: 5,
+				envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			})
+			.catch((error: unknown) => error)
 
 		expect(ran).toBe(0)
 		expect(failure).toBeInstanceOf(ChildrenPendingError)
 		expect((failure as Error).message).toContain("1 of them has not finished yet")
 		expect((failure as Error).message).toContain("spending no attempt")
 		expect(reported).toEqual([])
-		expect(await jobs.dead.list("nfe")).toEqual([])
+		expect(buried).toEqual([])
 	})
 })
 
-describe("a slot that holds fewer children than it was enqueued with", () => {
-	test("buries the parent with the reason children_short, naming what the slot lost", async () => {
-		const driver = driverOnFlowState({ results: [manifestResult], failures: [], pending: 0 })
-		const jobs = createJobs({ driver, deadQueues: ["nfe"] })
-		let ran = 0
+describe("a flow read that fails on the way to the handler", () => {
+	test("leaves the job its remaining attempts, burying nothing", async () => {
+		const driver = recordingDriver()
+		const buried: string[] = []
+		const refused = new Error("Connection is closed.")
 
-		await jobs.start([
-			defineHandler(zipExport, async () => {
-				ran += 1
+		const jobs = createJobs({
+			driver: {
+				...driver,
+				flow: {
+					enqueue: (root) => driver.flow.enqueue(root),
 
-				return { url: "https://a.example/1" }
-			}),
-		])
-
-		await driver.enqueue({
-			queue: "nfe",
-			envelope: { ...zipEnvelope, slots: { xmls: 2, manifest: 1 } },
-			delivery: DELIVERY_DEFAULTS,
+					async read() {
+						throw refused
+					},
+				},
+			},
+			deadQueues: ["nfe"],
+			hooks: {
+				onDead: (event) => {
+					buried.push(event.name)
+				},
+			},
 		})
 
-		const failure = await driver.runNext().catch((error: unknown) => error)
-		const buried = await jobs.dead.list("nfe")
+		await jobs.start([defineHandler(zipExport, async () => ({ url: "https://a.example/1" }))])
 
-		expect(ran).toBe(0)
-		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect(buried).toHaveLength(1)
-		expect(buried[0]?.reason).toBe("children_short")
-		expect(buried[0]?.error.message).toContain('"xmls" was given 2 and 0 arrived')
+		const failure = await driver
+			.deliver("nfe", {
+				id: "1",
+				attempt: 1,
+				maxAttempts: 5,
+				envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			})
+			.catch((error: unknown) => error)
+
+		expect(failure).toBe(refused)
+		expect(buried).toEqual([])
 	})
 })
 
 describe("dead.replay of a flow job", () => {
 	test("refuses it, and names the repair path in job ids", async () => {
-		const driver = driverOnFlowState({
+		const driver = memoryDriver()
+		const jobs = createJobs({ driver, deadQueues: ["nfe"], definitions: [zipExport] })
+
+		const dead = new ChildDeadError(zipExport, {
 			results: [],
 			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
 			pending: 0,
 		})
 
-		const jobs = createJobs({ driver, deadQueues: ["nfe"], definitions: [zipExport] })
-
-		await jobs.start([defineHandler(zipExport, async () => ({ url: "https://a.example/1" }))])
-
-		await driver.enqueue({ queue: "nfe", envelope: zipEnvelope, delivery: DELIVERY_DEFAULTS })
-		await driver.runNext().catch(() => {})
+		await driver.dead.bury("nfe", {
+			jobId: "nfe:1",
+			envelope: zipEnvelope,
+			error: { name: dead.name, message: dead.message },
+			reason: "child_dead",
+		})
 
 		const buried = await jobs.dead.list("nfe")
 		const failure = await jobs.dead.replay(buried[0]?.id ?? "").catch((error: unknown) => error)
@@ -816,7 +913,6 @@ describe("dead.replay of a flow job", () => {
 		expect((failure as Error).message).toContain("nfe:1")
 		expect((failure as Error).message).toContain("jobs.retry")
 		expect((failure as Error).message).toContain("jobs.dead.discard")
-		expect(buried[0]?.error.message).toContain("nfe:xmls~ab")
 		expect(await jobs.dead.list("nfe")).toHaveLength(1)
 	})
 })

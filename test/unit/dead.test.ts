@@ -1,7 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
-import { createJobs, defineHandler, defineJob } from "@/index"
+import { childDead, deadReason } from "@/Dead"
+import { ChildDeadError, ChildrenShortError } from "@/Flow"
+import {
+	CancelledError,
+	createJobs,
+	defineHandler,
+	defineJob,
+	type JobDelivery,
+	VersionAheadError,
+} from "@/index"
 import { type MemoryDriver, memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
 
@@ -393,5 +402,92 @@ describe("inspecting and replaying a dead job", () => {
 		const failure = await jobs.dead.discard("billing.dead:1").catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain("billing.dead:1")
+	})
+})
+
+const reconcileLedger = defineJob({
+	name: "billing.reconcile",
+	queue: "billing",
+	payload: type({ day: "string" }),
+})
+
+const closeBooks = defineJob({
+	name: "billing.close",
+	queue: "billing",
+	payload: type({ month: "string" }),
+	awaits: { ledger: reconcileLedger },
+})
+
+const ledgerResult = { slot: "ledger", value: { rows: 2 } }
+
+const childIsDead = new ChildDeadError(closeBooks, {
+	results: [ledgerResult],
+	failures: [{ id: "billing:ledger~ab", slot: "ledger", reason: "the ledger is locked" }],
+	pending: 0,
+})
+
+const midway: JobDelivery = {
+	id: "1",
+	attempt: 1,
+	attemptsStarted: 1,
+	maxAttempts: 3,
+	envelope: {},
+}
+
+const lastAttempt: JobDelivery = { ...midway, attempt: 3 }
+
+function unrecoverable(error: Error): UnrecoverableError {
+	const failure = new UnrecoverableError(error.message)
+
+	failure.cause = error
+
+	return failure
+}
+
+describe("deadReason", () => {
+	test("reads a cancelled delivery as cancelled", () => {
+		expect(deadReason(midway, new CancelledError("billing.charge"))).toBe("cancelled")
+	})
+
+	test("reads a payload a newer deploy wrote as version_ahead", () => {
+		expect(deadReason(midway, new VersionAheadError("billing.charge", 2, 1))).toBe("version_ahead")
+	})
+
+	test("reads a child that failed every attempt as child_dead, raw and wrapped", () => {
+		expect(deadReason(midway, childIsDead)).toBe("child_dead")
+		expect(deadReason(midway, unrecoverable(childIsDead))).toBe("child_dead")
+	})
+
+	test("reads a slot holding fewer children as children_short, raw and wrapped", () => {
+		const short = new ChildrenShortError("a slot holds fewer children")
+
+		expect(deadReason(midway, short)).toBe("children_short")
+		expect(deadReason(midway, unrecoverable(short))).toBe("children_short")
+	})
+
+	test("reads a handler that gave up as unrecoverable", () => {
+		expect(deadReason(midway, new UnrecoverableError("the card is closed"))).toBe("unrecoverable")
+	})
+
+	test("reads the last attempt of an ordinary failure as attempts_exhausted", () => {
+		expect(deadReason(lastAttempt, new Error("the card was declined"))).toBe("attempts_exhausted")
+	})
+
+	test("reads an ordinary failure with attempts left as no burial at all", () => {
+		expect(deadReason(midway, new Error("the card was declined"))).toBeUndefined()
+	})
+})
+
+describe("childDead", () => {
+	test("reads back the error a burial keeps the children of, raw and wrapped", () => {
+		expect(childDead(childIsDead)?.results).toEqual([ledgerResult])
+		expect(childDead(unrecoverable(childIsDead))).toBe(childIsDead)
+	})
+
+	test("reads nothing out of an error no child raised", () => {
+		const declined = new Error("the card was declined")
+
+		expect(childDead(declined)).toBeUndefined()
+		expect(childDead(unrecoverable(declined))).toBeUndefined()
 	})
 })

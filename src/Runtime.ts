@@ -1,14 +1,12 @@
 import { UnrecoverableError } from "bullmq"
 import { CANCEL_SWEEP_MS, CancelledError, type RunningDelivery } from "@/Cancellation"
 import type { JobsConfig } from "@/Client"
-import { type DeadReason, deadQueueName } from "@/Dead"
+import { childDead, deadQueueName, deadReason } from "@/Dead"
 import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
 import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type {
 	ConsumeRequest,
 	Consumer,
-	FlowState,
-	FlowStore,
 	JobDelivery,
 	JobDriver,
 	QueueLimiter,
@@ -16,13 +14,7 @@ import type {
 } from "@/Driver"
 import { type Envelope, readEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
-import {
-	ChildDeadError,
-	ChildrenPendingError,
-	ChildrenShortError,
-	childrenShort,
-	slotsOf,
-} from "@/Flow"
+import { ChildDeadError, ChildrenPendingError, ChildrenShortError, childrenFor } from "@/Flow"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
 import {
 	idempotencyKeyFor,
@@ -32,9 +24,9 @@ import {
 	stillRunning,
 } from "@/Idempotency"
 import { composeJobId } from "@/JobId"
-import { assertVersionIsKnown, migrateEnvelope, VersionAheadError } from "@/Migration"
+import { assertVersionIsKnown, migrateEnvelope } from "@/Migration"
 import { validatePayload } from "@/Payload"
-import { validateResult } from "@/Result"
+import { ResultError, validateResult } from "@/Result"
 import type { Schedule } from "@/Schedule"
 import { ShutdownAbortError } from "@/Shutdown"
 
@@ -109,144 +101,6 @@ function envelopeOf(delivery: JobDelivery): Envelope {
 	} catch (error) {
 		throw unrecoverable(error)
 	}
-}
-
-/**
- * Reads what every slot of a definition settled into, and puts each value
- * through the `result` schema of the definition that slot declares.
- *
- * It runs before the handler is called, not inside it, so a value a schema
- * refuses fails this job for good with no handler code having run. Failing for
- * good is the only honest outcome: the child is done, and running the parent
- * again would read the very same value.
- */
-async function childrenOf(
-	definition: JobDefinition,
-	state: FlowState,
-): Promise<Record<string, unknown>> {
-	const filled = await Promise.all(
-		slotsOf(definition).map(async (slot) => {
-			const values = await Promise.all(
-				state.results
-					.filter((result) => result.slot === slot.name)
-					.map((result) =>
-						validateResult(slot.definition, result.value).catch((error: unknown) => {
-							throw unrecoverable(error)
-						}),
-					),
-			)
-
-			return [slot.name, slot.many ? values : values[0]] as const
-		}),
-	)
-
-	return Object.fromEntries(filled)
-}
-
-interface ChildrenRead {
-	readonly flow: FlowStore
-	readonly definition: JobDefinition
-	readonly envelope: Envelope
-	readonly queue: string
-	readonly id: string
-}
-
-/**
- * What this job's children settled into, with every shape a handler must not
- * see refused before the handler is reached.
- *
- * The read is gated on the definition, not on `envelope.origin`. Waiting on
- * children is a property of the definition, and an envelope written by a
- * schedule, or by a build where this job waited on nothing, is dispatched
- * against the definition of today all the same — gating on the origin let every
- * one of those run over empty slots and complete green. A definition that waits
- * on nothing costs no round trip, which is every ordinary job.
- *
- * The order of the refusals is the order of what they mean. A child still in
- * flight is not a lost child, so that delivery ends before the handler and the
- * driver puts the job back to waiting on its children, spending no attempt. A
- * child that failed for good is the burial that already existed. What is left is a slot that lost a child leaving no trace in Redis,
- * which only the envelope can see.
- */
-async function childrenFor({
-	flow,
-	definition,
-	envelope,
-	queue,
-	id,
-}: ChildrenRead): Promise<Record<string, unknown>> {
-	if (slotsOf(definition).length === 0) {
-		return {}
-	}
-
-	const state = await flow.read(queue, id)
-
-	if (state.pending > 0) {
-		throw new ChildrenPendingError(definition, state.pending)
-	}
-
-	if (state.failures.length > 0) {
-		throw unrecoverable(new ChildDeadError(definition, state))
-	}
-
-	const short = childrenShort(definition, envelope.slots, state)
-
-	if (short) {
-		throw unrecoverable(short)
-	}
-
-	return childrenOf(definition, state)
-}
-
-/**
- * The error a burial reads through, whether it is the one thrown or the cause
- * of the `UnrecoverableError` that carries it — the same shape `ResultError`
- * reaches a dead entry in.
- */
-function raised(error: unknown): unknown {
-	if (error instanceof UnrecoverableError && error.cause !== undefined) {
-		return error.cause
-	}
-
-	return error
-}
-
-function childDead(error: unknown): ChildDeadError | undefined {
-	const cause = raised(error)
-
-	if (cause instanceof ChildDeadError) {
-		return cause
-	}
-
-	return undefined
-}
-
-function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
-	if (error instanceof CancelledError) {
-		return "cancelled"
-	}
-
-	if (error instanceof VersionAheadError) {
-		return "version_ahead"
-	}
-
-	if (childDead(error)) {
-		return "child_dead"
-	}
-
-	if (raised(error) instanceof ChildrenShortError) {
-		return "children_short"
-	}
-
-	if (error instanceof UnrecoverableError) {
-		return "unrecoverable"
-	}
-
-	if (delivery.attempt >= delivery.maxAttempts) {
-		return "attempts_exhausted"
-	}
-
-	return undefined
 }
 
 function handlersByName(handlers: JobHandler[]): Map<string, JobHandler> {
@@ -497,6 +351,16 @@ export async function startRuntime(
 			envelope,
 			queue: event.queue,
 			id: delivery.id,
+		}).catch((error: unknown) => {
+			if (
+				error instanceof ChildDeadError ||
+				error instanceof ChildrenShortError ||
+				error instanceof ResultError
+			) {
+				throw unrecoverable(error)
+			}
+
+			throw error
 		})
 
 		const controller = new AbortController()
