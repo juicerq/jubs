@@ -93,6 +93,28 @@ await jobs.enqueue(sendWelcomeEmail, { userId: "u_1", locale: "pt" })
 
 `enqueue` validates the payload before it touches Redis. An invalid payload rejects at the call site with a `PayloadError`, and nothing is written.
 
+**Wrapping `enqueue` keeps its types.** The generics that tie a definition to its payload and to what fills its slots are not spelled out by hand — the types they need are internal. Annotate the wrapper with `JobsClient["enqueue"]` instead, and pass anything extra around the call:
+
+```ts
+import { createJobs, type JobsClient, redisDriver } from "@juicerq/jubs"
+
+const jobs = createJobs({ driver: redisDriver(connection) })
+
+function tracedEnqueue(traceId: string): JobsClient["enqueue"] {
+	return async (definition, data, ...awaits) => {
+		console.log(traceId, definition.name)
+
+		return jobs.enqueue(definition, data, ...awaits)
+	}
+}
+
+const traced = tracedEnqueue("t-1")
+
+await traced(sendWelcomeEmail, { userId: "u_1", locale: "pt" })
+```
+
+The wrapper checks every call the way `jobs.enqueue` does: a wrong payload field, a missing slot, and a wrong leaf deep inside a flow input all still fail at the call site, pointing at the leaf that is wrong.
+
 **The worker process executes.** It calls `jobs.start(handlers)`, which opens one worker per queue in use and dispatches each job to the handler that owns its name. It returns a runtime with `close()`.
 
 A worker connection must be created with `maxRetriesPerRequest: null`, because BullMQ workers open a blocking connection. `start` checks this and throws with the fix before opening any worker.
@@ -193,6 +215,8 @@ A deploy is never atomic. Some jobs in Redis were written by the deploy before, 
 **Forwards: a new envelope on an old worker.** The old worker cannot read a shape it has never heard of, and guessing would corrupt data. jubs refuses instead: an envelope whose `v` is greater than the running `version` is **never** interpreted. It fails unrecoverably, burns one attempt, is not retried, and — if the queue is in `deadQueues` — is kept in the dead queue with the reason `version_ahead`. It never fires `onStart` — a job held by a future version never started. Once the new workers are up, replay it.
 
 The safe rollout is two deploys: workers first, producers second. Deploy the new version to the workers while producers still write the old one — the new workers migrate what the old producers write. Then deploy the producers. Nothing is ever `version_ahead` in that order.
+
+**A flow in flight is buried, not migrated.** `migrations` carries a payload across a deploy; it carries no children. A parent whose envelope was written before this build has no record of how many children each slot was given, so the first delivery after the deploy buries it as `children_short` instead of running its handler over slots it cannot read. Drain the flows before the deploy goes up, or accept enqueueing them again from the top with `jobs.enqueue(definition, data, awaits)`.
 
 **A scheduled job has no second deploy.** Its producer is `start` itself: at boot it rewrites the schedule template with the version it runs, on the key every other pod shares. During a rolling deploy an occurrence written at the new version can reach a pod still running the old one, and that occurrence fails `version_ahead`. Stop the queue's workers before you raise the `version` of a scheduled job. The occurrence waits in Redis and runs once the new workers are up — nothing is lost, only delayed, and BullMQ writes the next occurrence only once this one is consumed, so nothing piles up either.
 
@@ -611,7 +635,7 @@ await jobs.dead.discard(parentEntry.id)
 
 Nothing here is retryable, because there is nothing to retry — the missing child was cancelled, removed, or never enqueued at all. Enqueue the flow again from the top with `jobs.enqueue(definition, data, awaits)`, which builds the whole tree. `dead.replay` is not the repair: it enqueues one envelope, and this envelope cannot be replayed into children it never had.
 
-The same burial catches an envelope that carries no counts at all. That is a job enqueued by a build where this definition waited on nothing — a job left in Redis across the deploy that added `awaits`, or one an old `schedule` produced. It holds no children whatsoever, and the missing record says so. It is buried as `children_short` too, and the message tells the two cases apart: a slot that went short names its counts, a missing record names the deploy.
+The same burial catches an envelope that carries no counts at all. That envelope was written by a build that did not record them — a flow left in Redis across the deploy that added the counts — or it was enqueued with no children at all. Nothing left in Redis tells the two apart, so the runtime cannot know whether those slots are full or empty, and running the handler would risk reading an empty slot and completing green. It is buried as `children_short` too, and the message tells the two burials apart: a slot that went short names its counts, a missing record names the absent counts.
 
 ```ts
 const [dead] = await jobs.dead.list("reports")

@@ -132,6 +132,20 @@ describe("enqueuing a definition that waits on children", () => {
 		])
 	})
 
+	test("writes a count of 0 for a many slot filled with an empty array, and enqueues no child for it", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		await jobs.enqueue(
+			zipExport,
+			{ run_id: "r-1" },
+			{ xmls: [], manifest: { data: { run_id: "r-1" }, awaits: { row: { row: 7 } } } },
+		)
+
+		expect(driver.flows[0]?.envelope.slots).toEqual({ xmls: 0, manifest: 1 })
+		expect(driver.flows[0]?.children.map((child) => child.slot)).toEqual(["manifest"])
+	})
+
 	test("resolves the delivery of every node against its own definition", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })

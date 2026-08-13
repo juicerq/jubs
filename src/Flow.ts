@@ -140,7 +140,7 @@ export function childrenShort(
 
 	if (unrecorded.length > 0) {
 		return new ChildrenShortError(
-			`jubs: the job "${definition.name}" waits on the slots ${listed(unrecorded.map((slot) => slot.name))}, and its envelope carries no record of how many children they were given — it was enqueued by a build where this job did not wait on them, so it holds none at all and running the handler would read every one of those slots empty and complete green. Enqueue the job again with jobs.enqueue(definition, data, awaits), which builds the whole flow; this envelope cannot be replayed into children it never had.`,
+			`jubs: the job "${definition.name}" waits on the slots ${listed(unrecorded.map((slot) => slot.name))}, and its envelope carries no record of how many children they were given — it was written by a build that did not record those counts, or it was enqueued with no children at all, and nothing left tells the two apart. Without the counts the runtime cannot know whether those slots are full or empty, and running the handler would risk reading an empty slot and completing green. Enqueue the flow again from the top with jobs.enqueue(definition, data, awaits), which builds the whole flow; one envelope on its own cannot be replayed into a flow.`,
 		)
 	}
 
@@ -200,12 +200,12 @@ function assertAwaitsInput(definition: JobDefinition, awaits: unknown): Record<s
 
 	if (stray.many) {
 		throw new Error(
-			`jubs: the job "${definition.name}" waits on many of "${stray.definition.name}" in the slot "${stray.name}", and this enqueue passed one value — that slot is declared as an array, so it is filled with an array`,
+			`jubs: the job "${definition.name}" waits on many of "${stray.definition.name}" in the slot "${stray.name}", and this enqueue passed one value — fill that slot with an array, or drop the array around the definition the slot declares to wait on exactly one`,
 		)
 	}
 
 	throw new Error(
-		`jubs: the job "${definition.name}" waits on exactly one "${stray.definition.name}" in the slot "${stray.name}", and this enqueue passed an array — declare the slot as \`${stray.name}: [${stray.definition.name}]\` to wait on many of them`,
+		`jubs: the job "${definition.name}" waits on exactly one "${stray.definition.name}" in the slot "${stray.name}", and this enqueue passed an array — fill that slot with a single value, or wrap the definition the slot declares in an array to wait on many`,
 	)
 }
 
