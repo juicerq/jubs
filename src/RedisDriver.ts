@@ -23,6 +23,7 @@ import type {
 	ChildFailure,
 	ChildResult,
 	ConsumeRequest,
+	EnqueueRequest,
 	FlowChildNode,
 	FlowNode,
 	FlowState,
@@ -264,6 +265,30 @@ export function toJobsOptions(delivery: Delivery): JobsOptions {
 	}
 
 	return { ...options, delay: delivery.delayMs }
+}
+
+/**
+ * The options one enqueue is added with, and the id it is stored under when the
+ * caller derived one. BullMQ's `add` refuses to store a second job under an id
+ * it already keeps: it gives back the job that is there, without overwriting
+ * its data — which is what makes a redelivered outbox row one job, for as long
+ * as Redis keeps that job. Retention is the ceiling: a completed job leaves on
+ * `keepCompletedForMs`, a failed one leaves once 200 failures are newer than
+ * it, and an id whose job has left is an id nothing answers to.
+ *
+ * `deduplication` is never combined with such an id. The id is looked at first,
+ * and a deduplication key pointing at another job would answer with *that*
+ * job's id, so the row would be marked delivered by a job it never enqueued.
+ * The relay resolves its delivery without uniqueness for that reason.
+ */
+function toEnqueueOptions(request: EnqueueRequest): JobsOptions {
+	const options = toJobsOptions(request.delivery)
+
+	if (request.jobId === undefined) {
+		return options
+	}
+
+	return { ...options, jobId: request.jobId }
 }
 
 /**
@@ -698,7 +723,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			const job = await queueFor(request.queue).add(
 				request.envelope.name,
 				request.envelope,
-				toJobsOptions(request.delivery),
+				toEnqueueOptions(request),
 			)
 
 			if (!job.id) {

@@ -1,5 +1,11 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
-import { holdOrDeliver, inAtomicBlock, outsideAtomicBlock, runAtomicBlock } from "@/Atomic"
+import {
+	type HeldEnqueue,
+	holdOrDeliver,
+	inAtomicBlock,
+	outsideAtomicBlock,
+	runAtomicBlock,
+} from "@/Atomic"
 import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
 import {
 	type AwaitsMap,
@@ -9,12 +15,21 @@ import {
 	payloadVersion,
 } from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
-import type { CancelResult, EnqueuedJob, JobDriver, JobSnapshot, RetryResult } from "@/Driver"
+import type {
+	CancelResult,
+	EnqueuedJob,
+	EnqueueRequest,
+	JobDriver,
+	JobSnapshot,
+	RetryResult,
+} from "@/Driver"
+import type { Envelope } from "@/Envelope"
 import { composeFlow, slotsOf } from "@/Flow"
 import type { JobHooks } from "@/Hooks"
 import { idempotencyKeyFor } from "@/Idempotency"
 import { composeJobId, readJobId } from "@/JobId"
 import { migrateEnvelope } from "@/Migration"
+import { type JobsRelay, type Outbox, type RelayOptions, startRelayLoop } from "@/Outbox"
 import { validatePayload } from "@/Payload"
 import { type JobsRuntime, type StartOptions, startRuntime } from "@/Runtime"
 import { assertTimezone } from "@/Schedule"
@@ -38,6 +53,17 @@ export interface JobsConfig {
 	readonly deadQueues?: readonly string[]
 	readonly timezone?: string
 	readonly hooks?: JobHooks
+	/**
+	 * The table `jobs.atomic(fn, { tx })` writes its envelopes to, and
+	 * `jobs.startRelay()` reads them back from. Both throw without it.
+	 *
+	 * The client that writes and the client that relays need not be the same, and
+	 * usually are not: the relay is one process, while every producer writes. The
+	 * relaying one has to register the definition of every job the outbox may
+	 * carry, since a row keeps the envelope and reads its queue and its delivery
+	 * policy from the definition.
+	 */
+	readonly outbox?: Outbox
 }
 
 export interface JobsClient {
@@ -89,10 +115,45 @@ export interface JobsClient {
 	 * A delivery that fails mid-flush leaves the jobs before it enqueued and
 	 * abandons the ones after it: the failure names both counts.
 	 *
-	 * `options.tx` **throws synchronously**, before the block runs, for as long as
-	 * no outbox is configured on this client.
+	 * `options.tx` changes what the block does with what it holds: instead of
+	 * delivering it, the block writes every envelope through `outbox.save`,
+	 * inside the transaction you passed, and delivers nothing at all. The relay
+	 * is what delivers them afterwards, so the state change and its jobs commit
+	 * together or neither does.
+	 *
+	 * **That inverts the two scopes.** Without a `tx` the block wraps the
+	 * transaction, because it must outlive the commit. With a `tx` the block sits
+	 * *inside* the transaction, because `save` writes on a transaction that is
+	 * still open.
+	 *
+	 * A block given a `tx` refuses a flow, which is a tree and not one envelope,
+	 * and refuses to open inside a block that is already open. Both **throw
+	 * synchronously**, as does a `tx` given to a client with no outbox.
+	 *
+	 * A job whose definition declares `unique` is refused as well, when the block
+	 * writes it: uniqueness cannot be combined with the id the relay derives from
+	 * the row, and `idempotencyKey` is the exclusion that does travel through the
+	 * outbox.
 	 */
 	atomic<Result>(run: () => Promise<Result>, options?: { readonly tx?: unknown }): Promise<Result>
+	/**
+	 * Starts the relay: the loop that claims the envelopes an atomic block wrote
+	 * to the outbox, enqueues them, and marks the rows delivered. It gives back a
+	 * handle whose `close()` stops the loop and waits for the cycle under way.
+	 *
+	 * One cycle runs at a time, however long a cycle takes. A relay that dies
+	 * between the delivery and the mark leaves the rows claimable, and the next
+	 * relay enqueues them again under the same ids — one job, run once. The
+	 * ceiling of that guarantee is Redis's own retention: a row redelivered after
+	 * its job has been swept by `keepCompletedForMs` or `keepFailedCount` is a
+	 * job that runs a second time.
+	 *
+	 * Run one relay, or many: a claim that locks its rows is what keeps two
+	 * relays off one row, and `Outbox.claim` is where that lock lives.
+	 *
+	 * It throws without an outbox on the client.
+	 */
+	startRelay(options?: RelayOptions): JobsRelay
 	start<Queue extends string>(
 		handlers: JobHandler<Queue>[],
 		options?: StartOptions<Queue>,
@@ -244,15 +305,42 @@ async function forgetKey(
  */
 async function heldOrNamed(
 	queue: string,
-	store: () => Promise<EnqueuedJob>,
+	held: HeldEnqueue<EnqueuedJob>,
 ): Promise<EnqueuedJob | null> {
-	const stored = await holdOrDeliver(store)
+	const stored = await holdOrDeliver(held)
 
 	if (!stored) {
 		return null
 	}
 
 	return { id: composeJobId(queue, stored.id) }
+}
+
+/**
+ * The envelope one outbox row keeps, out of the enqueue a writing block held.
+ *
+ * What causes the job to exist is the relay, so the origin it carries is
+ * `relay` — the direct call the producer made is what wrote the row, not what
+ * enqueued the job. Uniqueness does not survive the trip and is refused here,
+ * where the job is still named and nothing is written yet.
+ */
+function envelopeForOutbox(request: EnqueueRequest): Envelope {
+	if (request.delivery.unique) {
+		throw new Error(
+			`jubs: the job "${request.envelope.name}" declares \`unique\`, and it was enqueued inside jobs.atomic(fn, { tx }) — uniqueness does not survive the outbox, and it is refused here rather than dropped. The relay stores a job under an id derived from the outbox row, which is what makes a row delivered twice one job for as long as Redis keeps that job; BullMQ reads that id first and the deduplication key second, so a key already pointing at another job would answer with that other job's id, the row would be marked delivered by a job that is not its own, and the job this row stands for would never exist. This job was not written and not enqueued. Drop \`unique\` from this definition — \`idempotencyKey\` stops a second execution and travels through the outbox — or enqueue this job outside the block, where uniqueness works and the transaction does not cover it.`,
+		)
+	}
+
+	return { ...request.envelope, origin: "relay" }
+}
+
+/**
+ * Refuses a flow a writing block held, because no outbox row can keep one.
+ */
+function flowRefusedByOutbox(name: string): never {
+	throw new Error(
+		`jubs: the flow "${name}" was enqueued inside jobs.atomic(fn, { tx }), and an outbox row holds one envelope and no tree — the whole flow would have to be rebuilt from that row, and what a slot was given would be lost on the way. This flow was not written and not enqueued. Enqueue the flow with jobs.enqueue(definition, data, awaits) outside the block, or hold it with jobs.atomic(fn) alone, which keeps it in memory until the block resolves.`,
+	)
 }
 
 function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
@@ -374,33 +462,72 @@ export function createJobs(config: JobsConfig): JobsClient {
 			if (slotsOf(definition).length > 0) {
 				const root = await composeFlow(definition, data, awaits[0])
 
-				return heldOrNamed(definition.queue, () => config.driver.flow.enqueue(root))
+				return heldOrNamed(definition.queue, {
+					deliver: () => config.driver.flow.enqueue(root),
+					forOutbox: () => flowRefusedByOutbox(definition.name),
+				})
 			}
 
 			const validated = await validatePayload(definition, data)
 
-			return heldOrNamed(definition.queue, () =>
-				config.driver.enqueue({
-					queue: definition.queue,
-					envelope: {
-						v: payloadVersion(definition),
-						name: definition.name,
-						data,
-						origin: "direct",
-					},
-					delivery: resolveDelivery(definition, validated),
-				}),
-			)
+			const request: EnqueueRequest = {
+				queue: definition.queue,
+				envelope: {
+					v: payloadVersion(definition),
+					name: definition.name,
+					data,
+					origin: "direct",
+				},
+				delivery: resolveDelivery(definition, validated),
+			}
+
+			return heldOrNamed(definition.queue, {
+				deliver: () => config.driver.enqueue(request),
+				forOutbox: () => envelopeForOutbox(request),
+			})
 		},
 
 		atomic(run, options) {
-			if (options?.tx !== undefined) {
+			if (options?.tx === undefined) {
+				return runAtomicBlock(run)
+			}
+
+			const outbox = config.outbox
+
+			if (!outbox) {
 				throw new Error(
-					"jubs: jobs.atomic was given a tx, and this client has no outbox configured — a tx exists to write the envelopes inside your own database transaction, and nothing here can accept one. Call jobs.atomic(fn) without it: the block still holds every enqueue until it resolves, but it holds them in memory, so a process that dies mid-block loses them.",
+					"jubs: jobs.atomic was given a tx, and this client has no outbox configured — a tx exists to write the envelopes inside your own database transaction, and nothing here can accept one. Give createJobs({ outbox }) an adapter over your table, or call jobs.atomic(fn) without the tx: the block still holds every enqueue until it resolves, but it holds them in memory, so a process that dies mid-block loses them.",
 				)
 			}
 
-			return runAtomicBlock(run)
+			if (inAtomicBlock()) {
+				throw new Error(
+					"jubs: jobs.atomic was given a tx inside an atomic block that is already open, and the two settle in different ways — the outer block delivers what it holds, while this one writes it to the outbox, and the inner block would have to be the one that decides. This inner block never ran, and the block around it stands. Move the transaction and its block outside, so the block with the tx is the only one open.",
+				)
+			}
+
+			const { tx } = options
+
+			return runAtomicBlock(run, (envelopes) => outbox.save(envelopes, tx))
+		},
+
+		startRelay(options) {
+			const outbox = config.outbox
+
+			if (!outbox) {
+				throw new Error(
+					"jubs: jobs.startRelay() was called on a client with no outbox configured — the relay claims the envelopes an atomic block wrote inside your transaction, and there is no table here to claim them from. Give createJobs({ outbox }) an adapter over your table.",
+				)
+			}
+
+			return outsideAtomicBlock(() =>
+				startRelayLoop({
+					outbox,
+					driver: config.driver,
+					definitions: config.definitions,
+					...options,
+				}),
+			)
 		},
 
 		start(handlers, options) {

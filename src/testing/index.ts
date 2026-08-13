@@ -84,6 +84,17 @@ export interface MemoryDriver extends JobDriver {
  * Per-queue `concurrency` is accepted and ignored — jobs run inline, one at a
  * time. A `limiter` throws, for the same reason a delay does.
  *
+ * An `EnqueueRequest` carrying a `jobId` is honoured: the job is stored under
+ * that id, and a second enqueue under an id this driver already keeps gives the
+ * kept job back, storing nothing and overwriting nothing — what Redis does, and
+ * what makes an outbox row delivered twice one job. It is **more** faithful
+ * than Redis in one way, and that way matters: this driver keeps every job it
+ * ever recorded, while Redis sweeps a finished job on its `keepCompletedForMs`
+ * and `keepFailedCount`, and an id whose job has been swept is an id nothing
+ * answers to — the same row delivered after that sweep enqueues a second job
+ * that runs. The retention window is the real limit of that guarantee, and it
+ * is only testable against `redisDriver`.
+ *
  * Enqueuing a definition that declares `awaits` throws, and so does delivering
  * one. Jobs run inline here, so nothing ever reaches `waiting-children`, and a
  * parent that ran before its children would agree with your test and disagree
@@ -314,8 +325,14 @@ export function memoryDriver(): MemoryDriver {
 				throw unsupported(rejected)
 			}
 
+			const already = request.jobId ? jobAt(request.queue, request.jobId) : undefined
+
+			if (already) {
+				return { id: already.id }
+			}
+
 			const job: MemoryJob = {
-				id: String(recorded.length + 1),
+				id: request.jobId || String(recorded.length + 1),
 				queue: request.queue,
 				maxAttempts: request.delivery.attempts,
 				envelope: JSON.parse(JSON.stringify(request.envelope)) as Envelope,

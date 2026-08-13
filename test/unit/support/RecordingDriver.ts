@@ -2,20 +2,13 @@ import { randomUUID } from "node:crypto"
 import type { KeptResult } from "@/Idempotency"
 import type {
 	ConsumeRequest,
-	Delivery,
-	Envelope,
+	EnqueueRequest,
 	FlowNode,
 	FlowState,
 	JobDelivery,
 	JobDriver,
 	ReconcileRequest,
 } from "@/index"
-
-export interface RecordedEnqueue {
-	readonly queue: string
-	readonly envelope: Envelope
-	readonly delivery: Delivery
-}
 
 /**
  * A delivery a test hands to `deliver`, whose `attemptsStarted` is the attempt
@@ -37,7 +30,7 @@ export interface RecordedFlowRead {
 }
 
 export interface RecordingDriver extends JobDriver {
-	readonly enqueued: RecordedEnqueue[]
+	readonly enqueued: EnqueueRequest[]
 	readonly flows: FlowNode[]
 	readonly flowReads: RecordedFlowRead[]
 	readonly consumed: ConsumeRequest[]
@@ -60,7 +53,7 @@ const REFUSED_RECONCILE = "recordingDriver was told to refuse the schedules of t
 const REFUSED_CLOSE = "recordingDriver was told to refuse the close of this consumer"
 
 export function recordingDriver(): RecordingDriver {
-	const enqueued: RecordedEnqueue[] = []
+	const enqueued: EnqueueRequest[] = []
 	const flows: FlowNode[] = []
 	const flowReads: RecordedFlowRead[] = []
 	let flowState: FlowState = { results: [], failures: [], pending: 0 }
@@ -216,13 +209,9 @@ export function recordingDriver(): RecordingDriver {
 
 		async enqueue(request) {
 			delivered += 1
-			enqueued.push({
-				queue: request.queue,
-				envelope: request.envelope,
-				delivery: request.delivery,
-			})
+			enqueued.push(request)
 
-			return { id: String(delivered) }
+			return { id: request.jobId ?? String(delivered) }
 		},
 
 		get: unstored,

@@ -87,6 +87,19 @@ describe("memoryDriver", () => {
 		expect(driver.enqueued(sendEmail)).toEqual([{ to: "ada@example.com" }])
 	})
 
+	test("keeps enqueueing after a cancelled job frees the id it was given", async () => {
+		const driver = memoryDriver()
+		const jobs = createJobs({ driver })
+
+		const first = await jobs.enqueue(chargeCard, { cents: "500" })
+
+		await jobs.enqueue(chargeCard, { cents: "700" })
+		await jobs.cancel(first?.id ?? "")
+		await jobs.enqueue(chargeCard, { cents: "900" })
+
+		expect(driver.enqueued(chargeCard)).toEqual([{ cents: "700" }, { cents: "900" }])
+	})
+
 	test("runNext fails when nothing is pending", async () => {
 		const failure = await memoryDriver()
 			.runNext()

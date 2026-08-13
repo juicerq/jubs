@@ -9,6 +9,22 @@ export interface EnqueueRequest {
 	readonly queue: string
 	readonly envelope: Envelope
 	readonly delivery: Delivery
+	/**
+	 * The id the job is stored under, when the caller derives it from something
+	 * of its own. The relay does, from the outbox row it delivers, so a row
+	 * delivered twice is one job.
+	 *
+	 * A driver that is given one **stores the job under it, and gives back the
+	 * job already stored under it when there is one** — without storing a second
+	 * job and without overwriting the first. That is what makes a repeated
+	 * delivery of one row harmless while the driver still keeps the job, and a
+	 * driver that made the id up instead would run the job twice. A store that
+	 * drops finished jobs answers to nothing once it has dropped this one, and
+	 * the same row delivered after that stores a job that runs.
+	 *
+	 * It is absent for every other enqueue, and the driver names the job itself.
+	 */
+	readonly jobId?: string
 }
 
 export interface EnqueuedJob {

@@ -348,6 +348,8 @@ export const syncAccount = defineJob({
 
 The memory driver throws on `unique`. Uniqueness is decided inside Redis, atomically and on a clock; an inline imitation would agree with your test and disagree with production. Test it against `redisDriver`.
 
+A definition that declares `unique` cannot be enqueued inside `jobs.atomic(fn, { tx })` either, and that enqueue throws: uniqueness does not survive the [outbox](#outbox-and-relay).
+
 ## Idempotency
 
 `idempotencyKey` stops a second **execution**; `unique` stops a second **enqueue**. That is the whole difference. Uniqueness works before the job exists and decides which one survives; the idempotency key works when a delivery is already in a worker's hands, and decides whether the handler runs at all.
@@ -505,9 +507,197 @@ The same holds for a promise `fn` starts and never awaits. Await the work inside
 
 **The delivery of a block is not atomic.** The held jobs are delivered one by one. A driver that fails on the third leaves the first two in Redis, and everything after the third is abandoned without being tried. `atomic` rejects with an error naming both counts, carrying the driver's own failure as its `cause`. Rolling the first two back is not on offer: a job already taken by a worker cannot be unenqueued — so running the block again re-delivers the ones that did land.
 
-**The jobs are held in memory.** A process that dies inside a block loses every job it held, and nothing records that they existed. This is the gap an outbox closes, by writing the envelopes inside your own transaction. `jobs.atomic(fn, { tx })` is where that will be asked for; it throws today, because no outbox is configured on the client.
+**The jobs are held in memory.** A process that dies inside a block loses every job it held, and nothing records that they existed. This is the gap an outbox closes, by writing the envelopes inside your own transaction — that is `jobs.atomic(fn, { tx })`, and the next section is all of it.
 
-Use a block for what a rollback would otherwise contradict. For a job that must survive a crash between the commit and the delivery, wait for the outbox.
+Use a block for what a rollback would otherwise contradict. For a job that must survive a crash between the commit and the delivery, use the outbox.
+
+## Outbox and relay
+
+An atomic block holds its jobs in memory. A process killed between the commit and the flush takes them with it, and the row it wrote is left with no job to act on it. The **outbox** closes that window: the jobs are written to a table of your own, in the same transaction as the state change, so the two commit together or neither does. The **relay** reads that table afterwards and puts the jobs in the queue.
+
+You own the table, the columns and the queries. This library opens no connection, knows no SQL and never sees your transaction — it hands you envelopes and takes back what you claim.
+
+```ts
+import { createJobs, redisDriver } from "@juicerq/jubs"
+
+const jobs = createJobs({
+	driver: redisDriver(connection),
+	definitions: [chargeCard],
+	outbox: kyselyOutbox(db),
+})
+
+await db.transaction().execute(async (tx) => {
+	await jobs.atomic(async () => {
+		const order = await createOrder(tx, cart)
+
+		await jobs.enqueue(chargeCard, { orderId: order.id })
+
+		await reserveStock(tx, cart)
+	}, { tx })
+})
+```
+
+The block enqueues nothing. It collects the envelopes, and when it resolves it hands them to `outbox.save(envelopes, tx)` — one call, inside your transaction. A block that throws saves nothing, and the transaction that would have rolled back rolls back the rows too.
+
+**The two scopes invert.** Without a `tx`, the block wraps the transaction, because it has to outlive the commit. With a `tx`, the block sits *inside* the transaction, because `save` writes on a transaction that is still open. Wrapping a transaction around a block that already holds a `tx` writes the rows and delivers nothing, forever.
+
+**`tx` is opaque.** It travels from your `jobs.atomic` call to your `outbox.save` untouched. Whatever your database library calls a transaction is what arrives, and casting it back is the one cast the adapter makes.
+
+### The relay
+
+```ts
+const relay = jobs.startRelay()
+
+process.on("SIGTERM", async () => {
+	await relay.close()
+})
+```
+
+One cycle claims a batch of rows, enqueues a job for each, and marks the rows it delivered. `close()` stops the loop and waits for the cycle under way.
+
+- `limit` — how many rows one cycle claims. 100 by default.
+- `intervalMs` — how long the relay waits between two cycles. 1000 by default.
+
+**One cycle runs at a time.** A cycle that outruns the interval holds the next tick back instead of running beside itself.
+
+**The relay client needs the definitions.** A row keeps the envelope and nothing else: the queue the job goes to and the delivery policy it is enqueued with are read from the definition, the way a replay reads them. Register in `createJobs({ definitions })` every job your outbox may carry. The client that writes and the client that relays need not be the same one, and usually are not — every producer writes, and one process relays.
+
+**The producer's enqueue answers `null`,** as it does in any block. There is no job yet — there is a row.
+
+### A row delivered twice is one job
+
+The relay dies between the enqueue and the mark, and the rows it delivered are claimed again. That is the normal end of a deploy, not an accident, and it produces no second job: the job is stored under an id derived from the row, `outbox-<row id>`, and BullMQ's `add` refuses to store a second job under an id it already keeps. It hands back the one that is there, without overwriting its data. The job runs once.
+
+The same rule sets what your row ids may be. **A row id carrying a colon is refused**, and so is an empty one: BullMQ reads a custom id with colons as a queue-and-id pair, and answers an empty id by making one up — which would mark the row delivered for a job nothing can name. A `bigserial` or a `uuid` is what to name rows with.
+
+**The ceiling of the guarantee is Redis's retention.** The id only collides while the job is still in Redis, and every promise above holds up to that line and no further. A completed job leaves on time — `keepCompletedForMs`, one hour by default. A failed job leaves on volume: `keepFailedCount` keeps the last 200 failures of the queue, so a busy queue drops a failure in minutes and a quiet one keeps it for weeks. Past either line the id answers to nothing, and the same row delivered again enqueues a job that runs a second time. Keep the completed window wider than the time a dead relay may take to come back, and read [delivery policy](#delivery-policy) for both settings.
+
+**A row whose job died for good is a silent no-op.** The failed job is still retained, so the `add` hands it back and nothing runs — and the relay is told nothing, because from Redis's side that is an ordinary answer. Replay it from the dead queue with `jobs.dead.replay(id)`.
+
+### What the outbox refuses
+
+**A flow is refused inside `jobs.atomic(fn, { tx })`,** and the enqueue throws. A row holds one envelope; a flow is a tree, and what each slot was given would be lost on the way through the table. Enqueue the flow outside the block, or hold it with `jobs.atomic(fn)` alone.
+
+**A `tx` inside a block that is already open is refused,** and throws before the block runs. The outer block delivers what it holds while the inner one would write it, and the inner block does not get to decide for both.
+
+**`jobs.dead.replay(id)` is refused in any block,** with or without a `tx`.
+
+**A job that declares `unique` is refused,** and the enqueue throws. Uniqueness does not survive the outbox: BullMQ reads the derived id first and the deduplication key second, so a key already pointing at another job answers with *that* job's id — the row would be marked delivered by a job that is not its own, and the job the row stands for would never exist. Passing it through in silence is the one thing not on offer. Drop `unique` from the definition, or enqueue that job outside the block, where uniqueness works and the transaction does not cover it. A job that must not run **twice** wants [`idempotencyKey`](#idempotency) instead, which travels through the outbox untouched.
+
+**A row the relay cannot deliver is left behind, and the rows around it go on.** A job name no definition on that client answers to, or a payload its schema refuses, takes that row out of the cycle and nothing else: the rows before and after it are enqueued and marked, and only the bad one stays unmarked. The failure names the row, through `console.error`, once per cycle.
+
+**That row does not fix itself.** Every cycle claims it again and fails on it again, so it holds a place in each batch and writes a line in each log. Two acts end it, and both are outside the relay: register the definition the failure names on the relaying client, or take the row out of the claim — mark it delivered by hand, or delete it. The adapter below automates the second one: it counts how often a row has been claimed and stops claiming it after ten, so a poisoned row leaves the batch on its own. Read what it gave up on:
+
+```sql
+select id, envelope, claims from jubs_outbox where delivered_at is null and claims >= 10;
+```
+
+### Running more than one relay
+
+Nothing in this library keeps two relays off one row. **The claim does**, and the claim is yours: lock the rows you read and skip the rows another relay holds. The adapter below does it with `for update skip locked`, and leases the rows it claims, so a relay killed mid-cycle releases its rows after a minute instead of holding them until someone notices.
+
+### A Kysely adapter
+
+The table:
+
+```sql
+create table jubs_outbox (
+	id bigserial primary key,
+	envelope jsonb not null,
+	claims integer not null default 0,
+	claimed_at timestamptz,
+	delivered_at timestamptz,
+	created_at timestamptz not null default now()
+);
+
+create index jubs_outbox_claimable on jubs_outbox (id) where delivered_at is null;
+```
+
+`id` is a `bigserial`, so it carries no colon and is never empty. The partial index is what keeps the claim off the rows already delivered, however long you keep them. `claims` counts how many times a row has been handed to a relay, and is what lets the claim give up on a row it cannot get past.
+
+```ts
+import type { Envelope, Outbox } from "@juicerq/jubs"
+import type { ColumnType, Generated, Kysely, Transaction } from "kysely"
+
+export interface Database {
+	jubs_outbox: {
+		id: Generated<string>
+		envelope: ColumnType<Envelope, string, string>
+		claims: Generated<number>
+		claimed_at: Date | null
+		delivered_at: Date | null
+		created_at: Generated<Date>
+	}
+}
+
+const CLAIM_LEASE_MS = 60_000
+
+const MAX_CLAIMS = 10
+
+export function kyselyOutbox(db: Kysely<Database>): Outbox {
+	return {
+		async save(envelopes, tx) {
+			await (tx as Transaction<Database>)
+				.insertInto("jubs_outbox")
+				.values(envelopes.map((envelope) => ({ envelope: JSON.stringify(envelope) })))
+				.execute()
+		},
+
+		async claim(limit) {
+			const rows = await db
+				.updateTable("jubs_outbox")
+				.set((eb) => ({ claimed_at: new Date(), claims: eb("claims", "+", 1) }))
+				.where((eb) =>
+					eb(
+						"id",
+						"in",
+						eb
+							.selectFrom("jubs_outbox as o")
+							.select("o.id")
+							.where("o.delivered_at", "is", null)
+							.where("o.claims", "<", MAX_CLAIMS)
+							.where((claimable) =>
+								claimable.or([
+									claimable("o.claimed_at", "is", null),
+									claimable("o.claimed_at", "<", new Date(Date.now() - CLAIM_LEASE_MS)),
+								]),
+							)
+							.orderBy("o.id")
+							.limit(limit)
+							.forUpdate()
+							.skipLocked(),
+					),
+				)
+				.returning(["id", "envelope"])
+				.execute()
+
+			return rows
+		},
+
+		async markDelivered(ids) {
+			await db
+				.updateTable("jubs_outbox")
+				.set({ delivered_at: new Date() })
+				.where("id", "in", ids)
+				.execute()
+		},
+	}
+}
+```
+
+The claim is one statement: the inner select locks the rows it reads and skips the ones another relay holds, and the update stamps `claimed_at` on exactly those. A row is claimable again once its lease has run out, which is what makes a killed relay's rows move on their own.
+
+`MAX_CLAIMS` is where the poisoned row is dealt with, and it belongs here rather than in the library — how many attempts a row deserves is a policy about your table. A row handed out ten times and never marked stops being claimed, so it stops taking a place in every batch. Nothing is lost by giving up: the row is still there, with its envelope and its count, and the query above is what reads it. **Read it.** A row counts a claim whether it failed on its own or a relay died holding it, so a healthy row can reach ten as well — and a row that stopped being claimed is a job that will never run until you act.
+
+`markDelivered` stamps a date rather than deleting, so the table doubles as the record of what was enqueued and when. Delete instead if you would rather not sweep it; the relay reads neither column.
+
+The column types are `pg`'s: a `jsonb` comes back parsed and goes in as a string, and a `bigserial` comes back as a string. Another driver reads them its own way, and `ColumnType` is where you say so — the envelope has to come back out of `claim` as the object `save` was given.
+
+### Testing the outbox
+
+`memoryDriver` honours a derived id the way Redis does: a second enqueue under an id it already keeps gives the kept job back, and stores nothing. A test can kill a relay between the delivery and the mark, run it again, and see one job.
+
+It is **more** faithful than Redis in one way, and that way is the ceiling above: it keeps every job it ever recorded, so it never loses an id to a retention sweep. Test the sweep against `redisDriver`.
 
 ## Scheduling
 
