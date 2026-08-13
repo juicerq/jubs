@@ -1055,7 +1055,7 @@ The unit tests need nothing. The integration tests run against a real Redis, so 
 cp .env.test.example .env.test
 ```
 
-`.env.test` is ignored by git. It sets `REDIS_URL` to `redis://127.0.0.1:6379` — edit it if your local Redis listens on another port. `bun test` loads the file on its own, so no environment prefix is needed.
+`.env.test` is ignored by git. It sets `REDIS_URL` to `redis://127.0.0.1:6381` — edit it if your local Redis listens on another port. Give the suite a Redis of its own: it obliterates queues and deletes keys by pattern, so pointing it at an instance another project shares makes both suites unreliable. `bun test` loads the file on its own, so no environment prefix is needed.
 
 ```sh
 bun run test
