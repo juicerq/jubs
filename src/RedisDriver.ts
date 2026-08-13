@@ -11,6 +11,7 @@ import {
 	Queue,
 	type RedisClient,
 	type RepeatOptions,
+	WaitingChildrenError,
 	Worker,
 	type WorkerOptions,
 } from "bullmq"
@@ -30,6 +31,7 @@ import type {
 	ScheduleUpsert,
 } from "@/Driver"
 import { type Envelope, readEnvelope } from "@/Envelope"
+import { ChildrenPendingError } from "@/Flow"
 import {
 	type IdempotencyLease,
 	type IdempotencyStore,
@@ -552,6 +554,42 @@ async function reschedule(
 	throw new DelayedError(postponed.message)
 }
 
+/**
+ * Puts a parent delivered while one of its children still runs back into
+ * `waiting-children`, instead of spending an attempt on a refusal it cannot
+ * avoid.
+ *
+ * The worker reads a `WaitingChildrenError` before it fails anything, so no
+ * attempt is made, no failure event is emitted, and the completion of the last
+ * child moves the parent back to `wait` on its own. Without this the parent is
+ * delivered again on backoff and refused again, and a child slower than the
+ * attempts allowed kills a parent that nothing was wrong with.
+ *
+ * The move only writes when the job is active, held under this token, and still
+ * has dependencies, and it answers `false` when the last child settled between
+ * the read and the call. Throwing anyway would leave the job stuck in `active`
+ * until the stalled check reclaims it, so a `false` lets the original refusal
+ * take the ordinary failure path: the attempt after it reads a full set.
+ */
+async function waitForChildren(
+	job: Job,
+	token: string | undefined,
+	pending: ChildrenPendingError,
+): Promise<never> {
+	if (!token) {
+		throw new Error(
+			`jubs: redis delivered job "${job.name}" without a worker token, and this delivery asked to wait on its children again instead of failing — jubs cannot move it back to waiting-children without the token, so it fails the attempt instead`,
+			{ cause: pending },
+		)
+	}
+
+	if (!(await job.moveToWaitingChildren(token))) {
+		throw pending
+	}
+
+	throw new WaitingChildrenError(pending.message)
+}
+
 export function redisDriver(connection: ConnectionOptions): JobDriver {
 	const queues = new Map<string, Queue>()
 	const client = scriptClient(connection)
@@ -823,6 +861,10 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 						.catch((error: unknown) => {
 							if (error instanceof LeaseHeldError || error instanceof ShutdownAbortError) {
 								return reschedule(job, token, error)
+							}
+
+							if (error instanceof ChildrenPendingError) {
+								return waitForChildren(job, token, error)
 							}
 
 							throw error

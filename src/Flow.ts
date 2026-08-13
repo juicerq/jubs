@@ -77,20 +77,20 @@ export class ChildDeadError extends Error {
 }
 
 /**
- * Why an attempt of a job that waits on children ended before its handler: one
+ * Why a delivery of a job that waits on children ended before its handler: one
  * of the children is running right now.
  *
- * It is retryable, and deliberately so. A parent reaches its handler with a
- * child in flight after that child was retried and the parent was retried
- * behind it, and the child fills its slot moments later — the next attempt
- * reads a full set and runs. Redis refuses the completion of this attempt
- * anyway, so failing here only moves the refusal to before the handler's side
- * effects instead of after them.
+ * It is not a failure. A parent reaches its dispatch with a child in flight
+ * after that child was retried and the parent was retried behind it, and the
+ * driver reads this to put the parent back to waiting on its children, so no
+ * attempt is spent and the child that settles last wakes it. Only the race
+ * where that child settles mid-move leaves this as an ordinary retryable
+ * failure, and the delivery after it reads a full set.
  */
 export class ChildrenPendingError extends Error {
 	constructor(definition: JobDefinition, pending: number) {
 		super(
-			`jubs: the job "${definition.name}" waits on children, and ${pending} of them ${pending === 1 ? "has" : "have"} not finished yet — this attempt ended before the handler ran, because a slot they fill would have read empty. The attempt after this one runs once they settle.`,
+			`jubs: the job "${definition.name}" waits on children, and ${pending} of them ${pending === 1 ? "has" : "have"} not finished yet — this delivery ended before the handler ran, because a slot they fill would have read empty. The job waits on its children again, spending no attempt, and runs once they settle.`,
 		)
 		this.name = "ChildrenPendingError"
 	}

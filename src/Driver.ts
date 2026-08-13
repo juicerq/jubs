@@ -74,8 +74,8 @@ export interface FlowState {
 	 * its dependencies empty. It is not always 0: a parent retried while a child
 	 * it lost is running again is delivered with that child still in flight, and
 	 * a handler run over the slot it has not filled yet would have its completion
-	 * refused by Redis anyway. Reading it is what lets that attempt fail before
-	 * the handler's side effects happen instead of after.
+	 * refused by Redis anyway. Reading it is what ends that delivery before the
+	 * handler, so the job waits on its children again, spending no attempt.
 	 */
 	readonly pending: number
 }

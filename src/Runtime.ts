@@ -163,9 +163,9 @@ interface ChildrenRead {
  * on nothing costs no round trip, which is every ordinary job.
  *
  * The order of the refusals is the order of what they mean. A child still in
- * flight is not a lost child, so that attempt fails retryably and the one after
- * it reads a full set. A child that failed for good is the burial that already
- * existed. What is left is a slot that lost a child leaving no trace in Redis,
+ * flight is not a lost child, so that delivery ends before the handler and the
+ * driver puts the job back to waiting on its children, spending no attempt. A
+ * child that failed for good is the burial that already existed. What is left is a slot that lost a child leaving no trace in Redis,
  * which only the envelope can see.
  */
 async function childrenFor({
@@ -597,6 +597,19 @@ export async function startRuntime(
 		await notify(config.hooks?.onDead, "onDead", failure)
 	}
 
+	/**
+	 * The refusals that leave without being reported are the ones that end a
+	 * delivery without ending an attempt: the driver turns each of them into a
+	 * move — delayed for a held key or a shutdown, back to `waiting-children` for
+	 * a child still running — and the attempt is spent by none of them.
+	 *
+	 * Reporting one anyway would fire `onAttemptFailed` for an attempt that never
+	 * failed, and a parent that meets a running child on its last allowed attempt
+	 * would be buried as `attempts_exhausted` while it sits alive in
+	 * `waiting-children`, waiting to run. The rare race where the last child
+	 * settles mid-move does spend an attempt with nothing reported; the delivery
+	 * after it reads a full set and runs the handler.
+	 */
 	function runOn(queue: string): ConsumeRequest["run"] {
 		return async (delivery) => {
 			const envelope = envelopeOf(delivery)
@@ -610,7 +623,11 @@ export async function startRuntime(
 			}
 
 			return dispatch(envelope, event, delivery).catch(async (error: unknown) => {
-				if (error instanceof LeaseHeldError || error instanceof ShutdownAbortError) {
+				if (
+					error instanceof LeaseHeldError ||
+					error instanceof ShutdownAbortError ||
+					error instanceof ChildrenPendingError
+				) {
 					throw error
 				}
 

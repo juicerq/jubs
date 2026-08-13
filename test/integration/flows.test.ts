@@ -1122,6 +1122,90 @@ describe("a buried flow job over redis", () => {
 	}, 30_000)
 })
 
+describe("a retried child slower than the parent's attempts over redis", () => {
+	test("waits for it instead of spending the parent's attempts, and runs the handler once", async () => {
+		const flowQueue = scoped("jubs.test.flow.slow-retry")
+
+		const chargeCard = defineJob({
+			name: scoped("slow.charge"),
+			queue: flowQueue,
+			payload: type({ id: "string" }),
+			result: type({ paid: "number" }),
+			delivery: { attempts: 1 },
+		})
+
+		const sendInvoice = defineJob({
+			name: scoped("slow.send"),
+			queue: flowQueue,
+			payload: type({ id: "string" }),
+			delivery: { attempts: 2, backoff: { type: "exponential", delayMs: 250 } },
+			awaits: { charge: chargeCard },
+		})
+
+		const live = await freshQueue(flowQueue)
+
+		const sent: unknown[] = []
+		const attemptsFailed: string[] = []
+		let declining = true
+
+		const jobs = createJobs({
+			driver: redisDriver(workerConnection),
+			deadQueues: [flowQueue],
+			definitions: [chargeCard, sendInvoice],
+			hooks: {
+				onAttemptFailed: (event) => {
+					attemptsFailed.push(event.name)
+				},
+			},
+		})
+
+		const runtime = await jobs.start([
+			defineHandler(chargeCard, async () => {
+				if (declining) {
+					throw new Error("the card was declined")
+				}
+
+				await Bun.sleep(4_000)
+
+				return { paid: 900 }
+			}),
+			defineHandler(sendInvoice, async (_data, context) => {
+				sent.push(context.children.charge)
+			}),
+		])
+
+		const enqueued = await jobs.enqueue(sendInvoice, { id: "inv-1" }, { charge: { id: "inv-1" } })
+
+		await waitForFinished(live, storedId(enqueued))
+		await waitFor(async () => (await jobs.dead.list(flowQueue)).length === 2)
+
+		const parentEntry = (await jobs.dead.list(flowQueue)).find(
+			(entry) => entry.envelope.name === sendInvoice.name,
+		)
+
+		const childId = failedChildId(parentEntry?.error.message)
+		const reportedBefore = [...attemptsFailed]
+
+		declining = false
+
+		expect(await jobs.retry(childId)).toEqual({ outcome: "retried" })
+		expect(await jobs.retry(parentEntry?.jobId ?? "")).toEqual({ outcome: "retried" })
+
+		await waitFor(async () => (await jobs.get(childId))?.state === "completed")
+		await waitFor(() => sent.length > 0)
+		await waitFor(async () => (await jobs.get(parentEntry?.jobId ?? ""))?.state === "completed")
+
+		const buried = await jobs.dead.list(flowQueue)
+		const parentBurials = buried.filter((entry) => entry.envelope.name === sendInvoice.name)
+
+		expect(sent).toEqual([{ paid: 900 }])
+		expect(parentBurials.map((entry) => entry.reason)).toEqual(["child_dead"])
+		expect(attemptsFailed).toEqual(reportedBefore)
+
+		await runtime.close()
+	}, 60_000)
+})
+
 describe("an idempotencyKey inside a flow over redis", () => {
 	test("stays in force on a leaf, and replays its result for a later job", async () => {
 		const flowQueue = scoped("jubs.test.flow.idem-leaf")

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
-import { ChildDeadError } from "@/Flow"
+import { ChildDeadError, ChildrenPendingError } from "@/Flow"
 import {
 	createJobs,
 	DELIVERY_DEFAULTS,
@@ -722,9 +722,20 @@ describe("a child that failed every attempt", () => {
 })
 
 describe("a child still in flight when the parent is delivered", () => {
-	test("ends the attempt before the handler, and buries nothing", async () => {
+	test("ends the delivery before the handler, reporting no failed attempt and burying nothing", async () => {
 		const driver = driverOnFlowState({ results: [manifestResult], failures: [], pending: 1 })
-		const jobs = createJobs({ driver, deadQueues: ["nfe"] })
+		const reported: string[] = []
+
+		const jobs = createJobs({
+			driver,
+			deadQueues: ["nfe"],
+			hooks: {
+				onAttemptFailed: (event) => {
+					reported.push(event.name)
+				},
+			},
+		})
+
 		let ran = 0
 
 		await jobs.start([
@@ -744,8 +755,10 @@ describe("a child still in flight when the parent is delivered", () => {
 		const failure = await driver.runNext().catch((error: unknown) => error)
 
 		expect(ran).toBe(0)
-		expect(failure).not.toBeInstanceOf(UnrecoverableError)
+		expect(failure).toBeInstanceOf(ChildrenPendingError)
 		expect((failure as Error).message).toContain("1 of them has not finished yet")
+		expect((failure as Error).message).toContain("spending no attempt")
+		expect(reported).toEqual([])
 		expect(await jobs.dead.list("nfe")).toEqual([])
 	})
 })
