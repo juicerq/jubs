@@ -974,8 +974,8 @@ The same burial catches an envelope that carries no counts at all. That envelope
 ```ts
 const [dead] = await jobs.dead.list("reports")
 
-console.log(dead.reason) // "children_short"
-console.log(dead.error.message) // names each short slot: what it was given, what arrived
+console.log(dead?.reason) // "children_short"
+console.log(dead?.error.message) // names each short slot: what it was given, what arrived
 ```
 
 **A cancellation that reaches a parent whose children are still running cancels nothing.** The result is `children_running`, and nothing changed in Redis: the job cannot be removed while a descendant holds a lock, and it is not running itself, so there is no delivery to abort either. Cancel the running child first, or ask again once the children have settled. Cancelling a parent that is merely waiting does remove it, together with its children — see [Operations](#operations) for what cancelling a single child does instead.
@@ -1064,10 +1064,14 @@ const dead = await jobs.dead.list("billing")
 
 for (const job of dead) {
 	console.log(job.id, job.envelope.name, job.reason, job.error.message)
-}
 
-await jobs.dead.replay(dead[0].id)
-await jobs.dead.discard(dead[1].id)
+	if (job.reason === "version_ahead") {
+		await jobs.dead.replay(job.id)
+		continue
+	}
+
+	await jobs.dead.discard(job.id)
+}
 ```
 
 `id` is opaque — it names the queue and the stored job together. Read it from `list` and pass it back; do not build one.
