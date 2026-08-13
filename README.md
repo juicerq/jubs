@@ -615,6 +615,8 @@ The console report happens either way, and the hook is what you add on top of it
 
 Nothing in this library keeps two relays off one row. **The claim does**, and the claim is yours: lock the rows you read and skip the rows another relay holds. The adapter below does it with `for update skip locked`, and leases the rows it claims, so a relay killed mid-cycle releases its rows after a minute instead of holding them until someone notices.
 
+**The lease is part of the contract, not a nicety of that adapter.** A cycle marks the rows it delivered and leaves the rest claimed — the row nothing could deliver, and every row of the batch a killed relay never reached. Those rows come back to a later cycle only because the claim expires. A `claim` of your own that holds a row for good hands it out once and never again: the job that row carries never runs, and nothing tells you — no failure, no line in the log, a row sitting undelivered in a table nobody reads. Every promise here about a row being claimed again rests on your claim releasing it.
+
 ### A Kysely adapter
 
 The table:

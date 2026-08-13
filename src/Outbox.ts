@@ -55,6 +55,13 @@ export interface Outbox {
 	 * second delivery of one row meets the job the first one stored and runs
 	 * nothing — for as long as Redis still keeps that job. Past its retention the
 	 * id names nothing, and the same row delivered again runs a second time.
+	 *
+	 * A claim has to expire. A cycle marks the rows it delivered and leaves the
+	 * rest claimed, on purpose: the row nothing could deliver stays where it is,
+	 * and a relay killed mid-cycle holds every row of its batch. Those rows come
+	 * back only because the claim releases them. A claim that holds a row for good
+	 * hands it out once and never again — the job that row carries never runs, and
+	 * nothing says so. The adapter in the README leases a claim for a minute.
 	 */
 	claim(limit: number): Promise<readonly ClaimedEnvelope[]>
 	/**
