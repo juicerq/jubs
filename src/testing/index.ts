@@ -84,11 +84,13 @@ export interface MemoryDriver extends JobDriver {
  * Per-queue `concurrency` is accepted and ignored — jobs run inline, one at a
  * time. A `limiter` throws, for the same reason a delay does.
  *
- * A flow throws on enqueue. Jobs run inline here, so nothing ever reaches
- * `waiting-children`, and a parent that ran before its children would agree
- * with your test and disagree with production. `context.children(definition)`
- * therefore reads empty for every job this driver delivers: test a flow against
- * `redisDriver`.
+ * Enqueuing a definition that declares `awaits` throws, and so does delivering
+ * one. Jobs run inline here, so nothing ever reaches `waiting-children`, and a
+ * parent that ran before its children would agree with your test and disagree
+ * with production. Reading what a flow settled into throws for the same reason,
+ * and for one more: an empty answer is not the truth about a flow but a shape
+ * the runtime refuses, so this driver would manufacture a burial no Redis ever
+ * produced. Test a job that waits on children against `redisDriver`.
  *
  * Starting a queue whose definitions declare a schedule throws, because a
  * recurrence is nothing but a clock: an inline imitation would fire when your
@@ -414,11 +416,11 @@ export function memoryDriver(): MemoryDriver {
 
 		flow: {
 			async enqueue() {
-				throw unsupported("flow")
+				throw unsupported("a job that waits on children")
 			},
 
 			async read() {
-				return { results: [], failures: [] }
+				throw unsupported("what the children of a job that waits on children settled into")
 			},
 		},
 

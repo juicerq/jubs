@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import type { ConnectionOptions } from "bullmq"
 import { DELIVERY_DEFAULTS, type ResolvedUnique } from "@/Delivery"
-import type { FlowNode } from "@/Driver"
+import type { FlowChildNode, FlowNode } from "@/Driver"
 import {
 	assertBlockingConnection,
 	cancelUnderLock,
@@ -118,7 +118,7 @@ describe("the idempotency lease Redis replies with", () => {
 	})
 })
 
-function node(queue: string, name: string, children: FlowNode[] = []): FlowNode {
+function node(queue: string, name: string, children: FlowChildNode[] = []): FlowNode {
 	return {
 		queue,
 		envelope: { v: 1, name, data: { id: "inv-1" }, origin: "flow" },
@@ -127,9 +127,20 @@ function node(queue: string, name: string, children: FlowNode[] = []): FlowNode 
 	}
 }
 
+function child(
+	slot: string,
+	queue: string,
+	name: string,
+	children: FlowChildNode[] = [],
+): FlowChildNode {
+	return { ...node(queue, name, children), slot }
+}
+
 describe("toFlowJob", () => {
 	test("names each node after its definition and sends the envelope to its own queue", () => {
-		const root = toFlowJob(node("billing", "invoice.send", [node("documents", "invoice.render")]))
+		const root = toFlowJob(
+			node("billing", "invoice.send", [child("pdf", "documents", "invoice.render")]),
+		)
 
 		expect(root.name).toBe("invoice.send")
 		expect(root.queueName).toBe("billing")
@@ -140,7 +151,9 @@ describe("toFlowJob", () => {
 	test("lets a child that failed for good drop out of its parent's dependencies", () => {
 		const root = toFlowJob(
 			node("billing", "invoice.send", [
-				node("billing", "invoice.charge", [node("billing", "invoice.reserve")]),
+				child("charge", "billing", "invoice.charge", [
+					child("funds", "billing", "invoice.reserve"),
+				]),
 			]),
 		)
 
@@ -159,42 +172,54 @@ describe("toFlowJob", () => {
 })
 
 describe("the flow state Redis replies with", () => {
-	test("reads each child's queue out of its job key, and its value as JSON", () => {
+	test("reads each child's slot out of its job key, and its value as JSON", () => {
 		expect(
-			readFlowState([
-				["bull:documents:5", '{"url":"https://a.example/1"}'],
-				[],
-				["invoice.render"],
-			]),
+			readFlowState([["bull:documents:pdf~ab-cd", '{"url":"https://a.example/1"}'], [], 0]),
 		).toEqual({
-			results: [
-				{ queue: "documents", name: "invoice.render", value: { url: "https://a.example/1" } },
-			],
+			results: [{ slot: "pdf", value: { url: "https://a.example/1" } }],
 			failures: [],
+			pending: 0,
 		})
 	})
 
-	test("names the failed children after the processed ones, and keeps their reason as it is", () => {
+	test("reads the failed children out of the second hash, and keeps their reason as it is", () => {
 		expect(
 			readFlowState([
-				["bull:documents:5", "null"],
-				["bull:billing:7", "the card was declined"],
-				["invoice.render", "invoice.charge"],
+				["bull:documents:pdf~ab", "null"],
+				["bull:billing:charge~cd", "the card was declined"],
+				0,
 			]),
 		).toEqual({
-			results: [{ queue: "documents", name: "invoice.render", value: null }],
-			failures: [{ id: "billing:7", name: "invoice.charge", reason: "the card was declined" }],
+			results: [{ slot: "pdf", value: null }],
+			failures: [{ id: "billing:charge~cd", slot: "charge", reason: "the card was declined" }],
+			pending: 0,
 		})
 	})
 
 	test("keeps a child that returned nothing at all, as a result with no value", () => {
-		expect(readFlowState([["bull:documents:5", ""], [], ["invoice.render"]]).results).toEqual([
-			{ queue: "documents", name: "invoice.render", value: undefined },
+		expect(readFlowState([["bull:documents:pdf~ab", ""], [], 0]).results).toEqual([
+			{ slot: "pdf", value: undefined },
 		])
 	})
 
-	test("a parent that waits on nobody has no results and no failures", () => {
-		expect(readFlowState([[], [], []])).toEqual({ results: [], failures: [] })
+	test("keeps a slot apart from the slot name it is a substring of", () => {
+		expect(
+			readFlowState([["bull:nfe:xml~ab", "1", "bull:nfe:xmls~cd", "2"], [], 0]).results.map(
+				(result) => result.slot,
+			),
+		).toEqual(["xml", "xmls"])
+	})
+
+	test("counts the children that have settled into neither hash as still pending", () => {
+		expect(readFlowState([[], [], 2]).pending).toBe(2)
+	})
+
+	test("a parent that waits on nobody has no results, no failures and nothing pending", () => {
+		expect(readFlowState([[], [], 0])).toEqual({ results: [], failures: [], pending: 0 })
+	})
+
+	test("reads no slot at all out of an id that carries none", () => {
+		expect(readFlowState([["bull:documents:5", "null"], [], 0]).results[0]?.slot).toBe("")
 	})
 })
 
@@ -209,52 +234,33 @@ describe("a cancellation Redis refused for a lock", () => {
 })
 
 describe("the job id of a flow node", () => {
-	test("names every child after its definition, so its name survives the child's own sweep", () => {
-		const root = toFlowJob(node("billing", "invoice.send", [node("documents", "invoice.render")]))
+	test("names every child after the slot it fills, so the slot survives the child's own sweep", () => {
+		const root = toFlowJob(
+			node("billing", "invoice.send", [child("pdf", "documents", "invoice.render")]),
+		)
 
 		expect(root.opts?.jobId).toBeUndefined()
-		expect(root.children?.[0]?.opts?.jobId).toMatch(/^invoice\.render~[0-9a-f-]{36}$/)
+		expect(root.children?.[0]?.opts?.jobId).toMatch(/^pdf~[0-9a-f-]{36}$/)
 	})
 
-	test("gives two children of one definition ids of their own", () => {
+	test("gives two children of one slot ids of their own", () => {
 		const root = toFlowJob(
 			node("billing", "invoice.send", [
-				node("documents", "invoice.render"),
-				node("documents", "invoice.render"),
+				child("pdf", "documents", "invoice.render"),
+				child("pdf", "documents", "invoice.render"),
 			]),
 		)
 
 		expect(root.children?.[0]?.opts?.jobId).not.toBe(root.children?.[1]?.opts?.jobId)
 	})
-})
 
-describe("a child whose hash Redis already swept", () => {
-	test("reads its definition name back out of its job id", () => {
-		expect(
-			readFlowState([
-				["bull:documents:invoice.render~ab-cd", '{"url":"https://a.example/1"}'],
-				[],
-				[""],
-			]),
-		).toEqual({
-			results: [
-				{ queue: "documents", name: "invoice.render", value: { url: "https://a.example/1" } },
-			],
-			failures: [],
-		})
-	})
+	test("reads back through readFlowState as the slot the node declared", () => {
+		const root = toFlowJob(
+			node("billing", "invoice.send", [child("pdf", "documents", "invoice.render")]),
+		)
 
-	test("keeps the name the hash still holds over the one the id carries", () => {
-		expect(
-			readFlowState([
-				["bull:documents:invoice.render~ab", '{"url":"https://a.example/1"}'],
-				[],
-				["invoice.render"],
-			]).results[0]?.name,
-		).toBe("invoice.render")
-	})
+		const key = `bull:documents:${root.children?.[0]?.opts?.jobId}`
 
-	test("reads no name at all out of an id that carries none", () => {
-		expect(readFlowState([["bull:documents:5", "null"], [], [""]]).results[0]?.name).toBe("")
+		expect(readFlowState([[key, "null"], [], 0]).results[0]?.slot).toBe("pdf")
 	})
 })

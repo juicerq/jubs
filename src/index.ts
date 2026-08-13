@@ -2,6 +2,7 @@ export { CancelledError, type RunningDelivery } from "@/Cancellation"
 export { createJobs, type JobsClient, type JobsConfig } from "@/Client"
 export type { DeadEntry, DeadJob, DeadReason } from "@/Dead"
 export {
+	type AwaitsInput,
 	defineHandler,
 	defineJob,
 	type HandlerContext,
@@ -20,6 +21,7 @@ export type {
 	DeadStore,
 	EnqueuedJob,
 	EnqueueRequest,
+	FlowChildNode,
 	FlowNode,
 	FlowState,
 	FlowStore,
@@ -34,7 +36,6 @@ export type {
 } from "@/Driver"
 export type { Envelope, TraceContext } from "@/Envelope"
 export type { SerializedError } from "@/Failure"
-export { childJob, type FlowChild, type FlowChildren } from "@/Flow"
 export type { JobEvent, JobFailureEvent, JobHooks } from "@/Hooks"
 export { type IdempotencyStore, LeaseHeldError } from "@/Idempotency"
 export { type PayloadMigration, VersionAheadError } from "@/Migration"

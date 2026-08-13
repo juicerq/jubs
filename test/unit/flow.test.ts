@@ -1,299 +1,672 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
+import { ChildDeadError } from "@/Flow"
 import {
-	childJob,
 	createJobs,
 	DELIVERY_DEFAULTS,
 	defineHandler,
 	defineJob,
 	type Envelope,
+	type FlowChildNode,
 	type FlowState,
+	type JobDefinition,
 } from "@/index"
+import { composeChildId, readChildSlot } from "@/JobId"
 import { type MemoryDriver, memoryDriver } from "@/testing/index"
 import { recordingDriver } from "./support/RecordingDriver"
 
-const sendInvoice = defineJob({
-	name: "invoice.send",
-	queue: "billing",
-	payload: type({ id: "string" }),
+const fetchXmls = defineJob({
+	name: "nfe.fetch-xmls",
+	queue: "nfe",
+	payload: type({ page: "number" }),
+	result: type({ xml: "string" }),
 })
 
-const renderPdf = defineJob({
-	name: "invoice.render",
+const signRow = defineJob({
+	name: "nfe.sign-row",
+	queue: "signing",
+	payload: type({ row: "number" }),
+	result: type({ signed: "boolean" }),
+})
+
+const buildManifest = defineJob({
+	name: "nfe.manifest",
 	queue: "documents",
-	payload: type({ id: "string" }),
+	payload: type({ run_id: "string" }),
+	result: type({ count: "number" }),
+	awaits: { row: signRow },
+})
+
+const zipExport = defineJob({
+	name: "nfe.zip",
+	queue: "nfe",
+	payload: type({ run_id: "string" }),
 	result: type({ url: "string.url" }),
+	awaits: { xmls: [fetchXmls], manifest: buildManifest },
 })
 
-const chargeCard = defineJob({
-	name: "invoice.charge",
-	queue: "billing",
-	payload: type({ id: "string" }),
+const twinned = defineJob({
+	name: "nfe.twinned",
+	queue: "nfe",
+	payload: type({ run_id: "string" }),
+	awaits: { left: fetchXmls, right: fetchXmls },
 })
 
-const reserveFunds = defineJob({
-	name: "invoice.reserve",
-	queue: "billing",
-	payload: type({ id: "string" }),
-})
+const leafNode: FlowChildNode = {
+	slot: "row",
+	queue: "signing",
+	envelope: { v: 1, name: "nfe.sign-row", data: { row: 7 }, origin: "flow" },
+	delivery: DELIVERY_DEFAULTS,
+	children: [],
+}
 
-const reconcileOnce = defineJob({
-	name: "invoice.reconcile",
-	queue: "billing",
-	payload: type({ id: "string" }),
-	delivery: { unique: { key: (data) => data.id, mode: "keepFirst" } },
-})
-
-describe("jobs.flow", () => {
-	test("enqueues the parent with its children nested to any depth", async () => {
+describe("enqueuing a definition that waits on children", () => {
+	test("adds the whole tree in one step, every node under the slot it fills", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
 
-		const enqueued = await jobs.flow(
-			sendInvoice,
-			{ id: "inv-1" },
+		const enqueued = await jobs.enqueue(
+			zipExport,
+			{ run_id: "r-1" },
 			{
-				children: [
-					childJob(renderPdf, { id: "inv-1" }),
-					childJob(
-						chargeCard,
-						{ id: "inv-1" },
-						{ children: [childJob(reserveFunds, { id: "inv-1" })] },
-					),
-				],
+				xmls: [{ page: 1 }, { page: 2 }],
+				manifest: { data: { run_id: "r-1" }, awaits: { row: { row: 7 } } },
 			},
 		)
 
-		expect(enqueued.id).toBe("billing:1")
+		expect(enqueued.id).toBe("nfe:1")
 		expect(driver.flows).toEqual([
 			{
-				queue: "billing",
-				envelope: { v: 1, name: "invoice.send", data: { id: "inv-1" }, origin: "flow" },
+				queue: "nfe",
+				envelope: {
+					v: 1,
+					name: "nfe.zip",
+					data: { run_id: "r-1" },
+					origin: "flow",
+					slots: { xmls: 2, manifest: 1 },
+				},
 				delivery: DELIVERY_DEFAULTS,
 				children: [
 					{
-						queue: "documents",
-						envelope: { v: 1, name: "invoice.render", data: { id: "inv-1" }, origin: "flow" },
+						slot: "xmls",
+						queue: "nfe",
+						envelope: { v: 1, name: "nfe.fetch-xmls", data: { page: 1 }, origin: "flow" },
 						delivery: DELIVERY_DEFAULTS,
 						children: [],
 					},
 					{
-						queue: "billing",
-						envelope: { v: 1, name: "invoice.charge", data: { id: "inv-1" }, origin: "flow" },
+						slot: "xmls",
+						queue: "nfe",
+						envelope: { v: 1, name: "nfe.fetch-xmls", data: { page: 2 }, origin: "flow" },
 						delivery: DELIVERY_DEFAULTS,
-						children: [
-							{
-								queue: "billing",
-								envelope: { v: 1, name: "invoice.reserve", data: { id: "inv-1" }, origin: "flow" },
-								delivery: DELIVERY_DEFAULTS,
-								children: [],
-							},
-						],
+						children: [],
+					},
+					{
+						slot: "manifest",
+						queue: "documents",
+						envelope: {
+							v: 1,
+							name: "nfe.manifest",
+							data: { run_id: "r-1" },
+							origin: "flow",
+							slots: { row: 1 },
+						},
+						delivery: DELIVERY_DEFAULTS,
+						children: [leafNode],
 					},
 				],
 			},
 		])
 	})
 
-	test("enqueues a parent with no children at all", async () => {
+	test("keeps two slots that hold the very same definition apart", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
 
-		await jobs.flow(sendInvoice, { id: "inv-1" }, {})
+		await jobs.enqueue(twinned, { run_id: "r-1" }, { left: { page: 1 }, right: { page: 2 } })
 
-		expect(driver.flows[0]?.children).toEqual([])
+		expect(driver.flows[0]?.children.map((child) => [child.slot, child.envelope.data])).toEqual([
+			["left", { page: 1 }],
+			["right", { page: 2 }],
+		])
 	})
 
-	test("refuses a parent whose definition declares unique", async () => {
+	test("resolves the delivery of every node against its own definition", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const patient = defineJob({
+			name: "nfe.patient",
+			queue: "nfe",
+			payload: type({ page: "number" }),
+			delivery: { attempts: 2 },
+		})
+
+		const hurried = defineJob({
+			name: "nfe.hurried",
+			queue: "nfe",
+			payload: type({ run_id: "string" }),
+			delivery: { priority: 1 },
+			awaits: { page: patient },
+		})
+
+		await jobs.enqueue(hurried, { run_id: "r-1" }, { page: { page: 1 } })
+
+		expect(driver.flows[0]?.delivery.priority).toBe(1)
+		expect(driver.flows[0]?.children[0]?.delivery.attempts).toBe(2)
+	})
+
+	test("refuses a child payload its schema rejects, and enqueues nothing at all", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
 
 		const failure = await jobs
-			.flow(reconcileOnce, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("invoice.reconcile")
-		expect((failure as Error).message).toContain("uniqueness does not apply inside a flow")
-		expect(driver.flows).toEqual([])
-	})
-
-	test("refuses a child whose definition declares unique", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(reconcileOnce, { id: "inv-1" })] })
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("invoice.reconcile")
-		expect(driver.flows).toEqual([])
-	})
-
-	test("rejects a child payload its schema refuses, before the driver is contacted", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const failure = await jobs
-			.flow(
-				sendInvoice,
-				{ id: "inv-1" },
-				{ children: [childJob(renderPdf, { id: 1 as unknown as string })] },
-			)
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("invoice.render")
-		expect(driver.flows).toEqual([])
-	})
-
-	test("rejects a grandchild payload its schema refuses", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const failure = await jobs
-			.flow(
-				sendInvoice,
-				{ id: "inv-1" },
+			.enqueue(
+				zipExport,
+				{ run_id: "r-1" },
 				{
-					children: [
-						childJob(
-							chargeCard,
-							{ id: "inv-1" },
-							{
-								children: [childJob(reserveFunds, { id: 1 as unknown as string })],
-							},
-						),
-					],
+					xmls: [{ page: "one" as unknown as number }],
+					manifest: { data: { run_id: "r-1" }, awaits: { row: { row: 7 } } },
 				},
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("invoice.reserve")
+		expect((failure as Error).message).toContain("nfe.fetch-xmls")
+		expect(driver.flows).toEqual([])
+	})
+
+	test("refuses a grandchild payload its schema rejects, and enqueues nothing at all", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const failure = await jobs
+			.enqueue(
+				zipExport,
+				{ run_id: "r-1" },
+				{
+					xmls: [{ page: 1 }],
+					manifest: {
+						data: { run_id: "r-1" },
+						awaits: { row: { row: "seven" as unknown as number } },
+					},
+				},
+			)
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("nfe.sign-row")
+		expect(driver.flows).toEqual([])
+	})
+
+	test("enqueues a definition whose `awaits` declares no slot as an ordinary job", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const plain = defineJob({
+			name: "nfe.plain",
+			queue: "nfe",
+			payload: type({ run_id: "string" }),
+			awaits: {},
+		})
+
+		const enqueued = await jobs.enqueue(plain, { run_id: "r-1" })
+
+		expect(enqueued.id).toBe("nfe:1")
+		expect(driver.flows).toEqual([])
+		expect(driver.enqueued).toEqual([
+			{
+				queue: "nfe",
+				envelope: { v: 1, name: "nfe.plain", data: { run_id: "r-1" }, origin: "direct" },
+				delivery: DELIVERY_DEFAULTS,
+			},
+		])
+	})
+
+	test("keeps the `idempotencyKey` of a leaf, whose input really is its payload alone", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const settleOnce = defineJob({
+			name: "nfe.settle",
+			queue: "signing",
+			payload: type({ row: "number" }),
+			idempotencyKey: (data) => String(data.row),
+		})
+
+		const settling = defineJob({
+			name: "nfe.settling",
+			queue: "nfe",
+			payload: type({ run_id: "string" }),
+			awaits: { row: settleOnce },
+		})
+
+		await jobs.enqueue(settling, { run_id: "r-1" }, { row: { row: 7 } })
+
+		expect(driver.flows[0]?.children[0]?.envelope.name).toBe("nfe.settle")
+	})
+})
+
+describe("what defineJob refuses beside `awaits`", () => {
+	test("refuses `unique`, because uniqueness does not apply inside a flow", () => {
+		expect(() =>
+			defineJob({
+				name: "nfe.once",
+				queue: "nfe",
+				payload: type({ run_id: "string" }),
+				delivery: { unique: { key: (data) => data.run_id, mode: "keepFirst" } },
+				awaits: { xmls: [fetchXmls] },
+			}),
+		).toThrow("uniqueness does not apply inside a flow")
+	})
+
+	test("refuses `idempotencyKey`, because the payload alone does not name the run", () => {
+		expect(() =>
+			defineJob({
+				name: "nfe.settled",
+				queue: "nfe",
+				payload: type({ run_id: "string" }),
+				idempotencyKey: (data) => data.run_id,
+				awaits: { xmls: [fetchXmls] },
+			}),
+		).toThrow("idempotencyKey")
+	})
+
+	test("refuses a slot name holding a colon, which a job id cannot carry", () => {
+		expect(() =>
+			defineJob({
+				name: "nfe.colon",
+				queue: "nfe",
+				payload: type({ run_id: "string" }),
+				awaits: { "nfe:xmls": fetchXmls },
+			}),
+		).toThrow('the slot "nfe:xmls", whose name holds ":"')
+	})
+
+	test("refuses a slot name holding the character that cuts a child id", () => {
+		expect(() =>
+			defineJob({
+				name: "nfe.tilde",
+				queue: "nfe",
+				payload: type({ run_id: "string" }),
+				awaits: { "xml~s": fetchXmls },
+			}),
+		).toThrow('the slot "xml~s", whose name holds "~"')
+	})
+})
+
+describe("what an enqueue refuses that defineJob cannot see", () => {
+	test("refuses a `unique` definition filling a slot anywhere in the tree", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const reconcileOnce = defineJob({
+			name: "nfe.reconcile",
+			queue: "signing",
+			payload: type({ row: "number" }),
+			delivery: { unique: { key: (data) => String(data.row), mode: "keepFirst" } },
+		})
+
+		const manifestOfOne = defineJob({
+			name: "nfe.manifest-of-one",
+			queue: "documents",
+			payload: type({ run_id: "string" }),
+			awaits: { row: reconcileOnce },
+		})
+
+		const exportOfOne = defineJob({
+			name: "nfe.export-of-one",
+			queue: "nfe",
+			payload: type({ run_id: "string" }),
+			awaits: { manifest: manifestOfOne },
+		})
+
+		const failure = await jobs
+			.enqueue(
+				exportOfOne,
+				{ run_id: "r-1" },
+				{ manifest: { data: { run_id: "r-1" }, awaits: { row: { row: 7 } } } },
+			)
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("nfe.reconcile")
+		expect((failure as Error).message).toContain("uniqueness does not apply inside a flow")
+		expect(driver.flows).toEqual([])
+	})
+
+	test("refuses a `unique` a delivery function returns, which defineJob never reads", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const uniqueLater = defineJob({
+			name: "nfe.unique-later",
+			queue: "nfe",
+			payload: type({ run_id: "string" }),
+			delivery: ({ data }) => ({ unique: { key: () => data.run_id, mode: "keepFirst" } }),
+			awaits: { xmls: [fetchXmls] },
+		})
+
+		const failure = await jobs
+			.enqueue(uniqueLater, { run_id: "r-1" }, { xmls: [{ page: 1 }] })
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("nfe.unique-later")
+		expect((failure as Error).message).toContain("uniqueness does not apply inside a flow")
 		expect(driver.flows).toEqual([])
 	})
 })
 
-const flowEnvelope: Envelope = {
+/**
+ * A definition read through its own widest type declares slots the call site
+ * cannot see, which is what makes the runtime assertion the only thing left
+ * between a short input and a parent running over it.
+ */
+const widened: JobDefinition = zipExport
+
+describe("the slots an enqueue has to fill", () => {
+	test("refuses an enqueue that passes nothing for the slots at all", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const failure = await jobs.enqueue(widened, { run_id: "r-1" }).catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain('the slots "xmls", "manifest"')
+		expect((failure as Error).message).toContain("passed nothing for them")
+		expect(driver.flows).toEqual([])
+	})
+
+	test("refuses an enqueue that leaves one declared slot out", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const failure = await jobs
+			.enqueue(widened, { run_id: "r-1" }, { xmls: [{ page: 1 }] })
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain('passed nothing for "manifest"')
+		expect(driver.flows).toEqual([])
+	})
+
+	test("refuses one value for a slot declared as an array", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const failure = await jobs
+			.enqueue(
+				widened,
+				{ run_id: "r-1" },
+				{ xmls: { page: 1 }, manifest: { data: {}, awaits: {} } },
+			)
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain(
+			'waits on many of "nfe.fetch-xmls" in the slot "xmls", and this enqueue passed one value',
+		)
+		expect(driver.flows).toEqual([])
+	})
+
+	test("refuses an array for a slot declared as exactly one", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+
+		const failure = await jobs
+			.enqueue(widened, { run_id: "r-1" }, { xmls: [{ page: 1 }], manifest: [] })
+			.catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain(
+			'waits on exactly one "nfe.manifest" in the slot "manifest", and this enqueue passed an array',
+		)
+		expect(driver.flows).toEqual([])
+	})
+})
+
+describe("the id one child of a flow is stored under", () => {
+	test("carries the slot it fills, and reads back as that slot", () => {
+		expect(readChildSlot(composeChildId("manifest"))).toBe("manifest")
+	})
+
+	test("keeps a slot name apart from the slot name it is a substring of", () => {
+		expect(readChildSlot(composeChildId("xml"))).toBe("xml")
+		expect(readChildSlot(composeChildId("xmls"))).toBe("xmls")
+	})
+
+	test("gives two children of one slot ids of their own", () => {
+		expect(composeChildId("xmls")).not.toBe(composeChildId("xmls"))
+	})
+
+	test("reads no slot out of an id that carries none", () => {
+		expect(readChildSlot("42")).toBe("")
+	})
+})
+
+const zipEnvelope: Envelope = {
 	v: 1,
-	name: "invoice.send",
-	data: { id: "inv-1" },
+	name: "nfe.zip",
+	data: { run_id: "r-1" },
 	origin: "flow",
 }
 
+const manifestResult = { slot: "manifest", value: { count: 2 } }
+
 describe("context.children", () => {
-	test("gives back the results of that definition, validated by its result schema", async () => {
+	test("reads one value for a single slot and an array for a many slot", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
-		const read: unknown[] = []
+		let read: unknown
 
 		driver.keepFlowState({
 			results: [
-				{ queue: "documents", name: "invoice.render", value: { url: "https://a.example/1" } },
-				{ queue: "billing", name: "invoice.charge", value: { paid: true } },
-				{ queue: "documents", name: "invoice.render", value: { url: "https://a.example/2" } },
+				{ slot: "xmls", value: { xml: "<a/>" } },
+				manifestResult,
+				{ slot: "xmls", value: { xml: "<b/>" } },
 			],
 			failures: [],
+			pending: 0,
 		})
 
 		await jobs.start([
-			defineHandler(sendInvoice, async (_data, context) => {
-				read.push(...(await context.children(renderPdf)))
+			defineHandler(zipExport, async (_data, context) => {
+				read = context.children
+
+				return { url: `https://a.example/${context.children.manifest.count}` }
 			}),
 		])
 
-		await driver.deliver("billing", {
+		await driver.deliver("nfe", {
 			id: "1",
 			attempt: 1,
 			maxAttempts: 5,
-			envelope: flowEnvelope,
+			envelope: { ...zipEnvelope, slots: { xmls: 2, manifest: 1 } },
 		})
 
-		expect(driver.flowReads).toEqual([{ queue: "billing", id: "1" }])
-		expect(read).toEqual([{ url: "https://a.example/1" }, { url: "https://a.example/2" }])
+		expect(driver.flowReads).toEqual([{ queue: "nfe", id: "1" }])
+		expect(read).toEqual({
+			xmls: [{ xml: "<a/>" }, { xml: "<b/>" }],
+			manifest: { count: 2 },
+		})
 	})
 
-	test("keeps two definitions sharing a queue apart", async () => {
+	test("keeps two slots that hold the very same definition apart", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
-		const read: unknown[][] = []
+		let read: unknown
 
 		driver.keepFlowState({
 			results: [
-				{ queue: "billing", name: "invoice.charge", value: { paid: true } },
-				{ queue: "billing", name: "invoice.reserve", value: { held: 1 } },
+				{ slot: "right", value: { xml: "<b/>" } },
+				{ slot: "left", value: { xml: "<a/>" } },
 			],
 			failures: [],
+			pending: 0,
 		})
 
 		await jobs.start([
-			defineHandler(sendInvoice, async (_data, context) => {
-				read.push(
-					[...(await context.children(chargeCard))],
-					[...(await context.children(reserveFunds))],
-				)
+			defineHandler(twinned, async (_data, context) => {
+				read = context.children
 			}),
 		])
 
-		await driver.deliver("billing", {
+		await driver.deliver("nfe", {
 			id: "1",
 			attempt: 1,
 			maxAttempts: 5,
-			envelope: flowEnvelope,
+			envelope: { ...zipEnvelope, name: "nfe.twinned", slots: { left: 1, right: 1 } },
 		})
 
-		expect(read).toEqual([[{ paid: true }], [{ held: 1 }]])
+		expect(read).toEqual({ left: { xml: "<a/>" }, right: { xml: "<b/>" } })
 	})
 
-	test("fails the parent unrecoverably when a child value its schema refuses comes back", async () => {
+	test("reads an empty array for a many slot the flow was enqueued with no child for", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
+		let read: unknown
+
+		driver.keepFlowState({ results: [manifestResult], failures: [], pending: 0 })
+
+		await jobs.start([
+			defineHandler(zipExport, async (_data, context) => {
+				read = context.children
+
+				return { url: "https://a.example/1" }
+			}),
+		])
+
+		await driver.deliver("nfe", {
+			id: "1",
+			attempt: 1,
+			maxAttempts: 5,
+			envelope: { ...zipEnvelope, slots: { xmls: 0, manifest: 1 } },
+		})
+
+		expect(read).toEqual({ xmls: [], manifest: { count: 2 } })
+	})
+
+	test("reads an empty object for a definition that waits on nothing", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+		let read: unknown
+
+		await jobs.start([
+			defineHandler(fetchXmls, async (_data, context) => {
+				read = context.children
+
+				return { xml: "<a/>" }
+			}),
+		])
+
+		await driver.deliver("nfe", {
+			id: "1",
+			attempt: 1,
+			maxAttempts: 5,
+			envelope: { v: 1, name: "nfe.fetch-xmls", data: { page: 1 }, origin: "flow" },
+		})
+
+		expect(read).toEqual({})
+	})
+
+	test("fails the job for good without running the handler when a result schema refuses a child value", async () => {
+		const driver = recordingDriver()
+		const jobs = createJobs({ driver })
+		let ran = false
 
 		driver.keepFlowState({
-			results: [{ queue: "documents", name: "invoice.render", value: { url: "not a url" } }],
+			results: [{ slot: "xmls", value: { xml: 7 } }, manifestResult],
 			failures: [],
+			pending: 0,
 		})
 
 		await jobs.start([
-			defineHandler(sendInvoice, async (_data, context) => {
-				await context.children(renderPdf)
+			defineHandler(zipExport, async () => {
+				ran = true
+
+				return { url: "https://a.example/1" }
 			}),
 		])
 
 		const failure = await driver
-			.deliver("billing", { id: "1", attempt: 1, maxAttempts: 5, envelope: flowEnvelope })
+			.deliver("nfe", {
+				id: "1",
+				attempt: 1,
+				maxAttempts: 5,
+				envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			})
 			.catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain("invoice.render")
+		expect((failure as Error).message).toContain("nfe.fetch-xmls")
+		expect(ran).toBe(false)
 	})
 
-	test("reads no flow state at all for a delivery that comes from outside a flow", async () => {
+	test("reads the flow state of a delivery from outside a flow, and fails it for good", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
-		const read: unknown[] = []
+		let ran = false
 
 		await jobs.start([
-			defineHandler(sendInvoice, async (_data, context) => {
-				read.push(...(await context.children(renderPdf)))
+			defineHandler(zipExport, async () => {
+				ran = true
+
+				return { url: "https://a.example/1" }
 			}),
 		])
 
-		await driver.deliver("billing", {
-			id: "1",
-			attempt: 1,
-			maxAttempts: 5,
-			envelope: { ...flowEnvelope, origin: "direct" },
+		const failure = await driver
+			.deliver("nfe", {
+				id: "1",
+				attempt: 1,
+				maxAttempts: 5,
+				envelope: { ...zipEnvelope, origin: "direct" },
+			})
+			.catch((error: unknown) => error)
+
+		expect(driver.flowReads).toEqual([{ queue: "nfe", id: "1" }])
+		expect(failure).toBeInstanceOf(UnrecoverableError)
+		expect((failure as Error).message).toContain(
+			"carries no record of how many children they were given",
+		)
+		expect(ran).toBe(false)
+	})
+})
+
+describe("ChildDeadError", () => {
+	test("names the slot that failed and the definition the parent declared for it", () => {
+		const dead = new ChildDeadError(zipExport, {
+			results: [],
+			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
+			pending: 0,
 		})
 
-		expect(driver.flowReads).toEqual([])
-		expect(read).toEqual([])
+		expect(dead.message).toContain('"xmls", which runs "nfe.fetch-xmls"')
+		expect(dead.message).toContain("nfe:xmls~ab")
+		expect(dead.message).toContain("the source timed out")
+	})
+
+	test("names a slot alone when the parent declares no such slot", () => {
+		const dead = new ChildDeadError(zipExport, {
+			results: [],
+			failures: [{ id: "nfe:pages~ab", slot: "pages", reason: "the source timed out" }],
+			pending: 0,
+		})
+
+		expect(dead.message).toContain('"pages" (nfe:pages~ab)')
+		expect(dead.message).not.toContain("which runs")
+	})
+
+	test("keeps what the children that did finish returned", () => {
+		const dead = new ChildDeadError(zipExport, {
+			results: [manifestResult],
+			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
+			pending: 0,
+		})
+
+		expect(dead.results).toEqual([manifestResult])
 	})
 })
 
 /**
  * The memory driver runs handlers inline and never reaches `waiting-children`,
- * so it keeps no flow state of its own. Its dead queue is real, which is what
- * a burial is read through, so the state a parent finds is stated here.
+ * so it holds no flow state and refuses to be asked for one. Its dead queue is
+ * real, which is what a burial is read through, so the state a parent finds is
+ * stated here.
  */
 function driverOnFlowState(state: FlowState): MemoryDriver {
 	const driver = memoryDriver()
@@ -301,37 +674,122 @@ function driverOnFlowState(state: FlowState): MemoryDriver {
 	return { ...driver, flow: { ...driver.flow, read: async () => state } }
 }
 
-const renderedUrl = { url: "https://a.example/1" }
-
 describe("a child that failed every attempt", () => {
 	test("buries the parent with the reason child_dead and keeps what the others returned", async () => {
 		const driver = driverOnFlowState({
-			results: [{ queue: "documents", name: "invoice.render", value: renderedUrl }],
-			failures: [{ id: "billing:2", name: "invoice.charge", reason: "the card was declined" }],
+			results: [manifestResult],
+			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
+			pending: 0,
 		})
 
-		const jobs = createJobs({ driver, deadQueues: ["billing"] })
+		const jobs = createJobs({ driver, deadQueues: ["nfe"] })
 		let ran = 0
 
 		await jobs.start([
-			defineHandler(sendInvoice, async () => {
+			defineHandler(zipExport, async () => {
 				ran += 1
+
+				return { url: "https://a.example/1" }
 			}),
 		])
 
-		await driver.enqueue({ queue: "billing", envelope: flowEnvelope, delivery: DELIVERY_DEFAULTS })
+		await driver.enqueue({ queue: "nfe", envelope: zipEnvelope, delivery: DELIVERY_DEFAULTS })
 
 		const failure = await driver.runNext().catch((error: unknown) => error)
-		const buried = await jobs.dead.list("billing")
+		const buried = await jobs.dead.list("nfe")
 
 		expect(ran).toBe(0)
 		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain("invoice.charge")
+		expect((failure as Error).message).toContain('"xmls", which runs "nfe.fetch-xmls"')
 		expect(buried).toHaveLength(1)
 		expect(buried[0]?.reason).toBe("child_dead")
-		expect(buried[0]?.children).toEqual([
-			{ queue: "documents", name: "invoice.render", value: renderedUrl },
+		expect(buried[0]?.children).toEqual([manifestResult])
+	})
+})
+
+describe("a child still in flight when the parent is delivered", () => {
+	test("ends the attempt before the handler, and buries nothing", async () => {
+		const driver = driverOnFlowState({ results: [manifestResult], failures: [], pending: 1 })
+		const jobs = createJobs({ driver, deadQueues: ["nfe"] })
+		let ran = 0
+
+		await jobs.start([
+			defineHandler(zipExport, async () => {
+				ran += 1
+
+				return { url: "https://a.example/1" }
+			}),
 		])
+
+		await driver.enqueue({
+			queue: "nfe",
+			envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			delivery: DELIVERY_DEFAULTS,
+		})
+
+		const failure = await driver.runNext().catch((error: unknown) => error)
+
+		expect(ran).toBe(0)
+		expect(failure).not.toBeInstanceOf(UnrecoverableError)
+		expect((failure as Error).message).toContain("1 of them has not finished yet")
+		expect(await jobs.dead.list("nfe")).toEqual([])
+	})
+})
+
+describe("a slot that holds fewer children than it was enqueued with", () => {
+	test("buries the parent with the reason children_short, naming what the slot lost", async () => {
+		const driver = driverOnFlowState({ results: [manifestResult], failures: [], pending: 0 })
+		const jobs = createJobs({ driver, deadQueues: ["nfe"] })
+		let ran = 0
+
+		await jobs.start([
+			defineHandler(zipExport, async () => {
+				ran += 1
+
+				return { url: "https://a.example/1" }
+			}),
+		])
+
+		await driver.enqueue({
+			queue: "nfe",
+			envelope: { ...zipEnvelope, slots: { xmls: 2, manifest: 1 } },
+			delivery: DELIVERY_DEFAULTS,
+		})
+
+		const failure = await driver.runNext().catch((error: unknown) => error)
+		const buried = await jobs.dead.list("nfe")
+
+		expect(ran).toBe(0)
+		expect(failure).toBeInstanceOf(UnrecoverableError)
+		expect(buried).toHaveLength(1)
+		expect(buried[0]?.reason).toBe("children_short")
+		expect(buried[0]?.error.message).toContain('"xmls" was given 2 and 0 arrived')
+	})
+})
+
+describe("dead.replay of a flow job", () => {
+	test("refuses it, and names the repair path in job ids", async () => {
+		const driver = driverOnFlowState({
+			results: [],
+			failures: [{ id: "nfe:xmls~ab", slot: "xmls", reason: "the source timed out" }],
+			pending: 0,
+		})
+
+		const jobs = createJobs({ driver, deadQueues: ["nfe"], definitions: [zipExport] })
+
+		await jobs.start([defineHandler(zipExport, async () => ({ url: "https://a.example/1" }))])
+
+		await driver.enqueue({ queue: "nfe", envelope: zipEnvelope, delivery: DELIVERY_DEFAULTS })
+		await driver.runNext().catch(() => {})
+
+		const buried = await jobs.dead.list("nfe")
+		const failure = await jobs.dead.replay(buried[0]?.id ?? "").catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("nfe:1")
+		expect((failure as Error).message).toContain("jobs.retry")
+		expect((failure as Error).message).toContain("jobs.dead.discard")
+		expect(buried[0]?.error.message).toContain("nfe:xmls~ab")
+		expect(await jobs.dead.list("nfe")).toHaveLength(1)
 	})
 })
 
@@ -341,171 +799,39 @@ describe("memoryDriver", () => {
 		const jobs = createJobs({ driver })
 
 		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("memoryDriver does not simulate")
-		expect((failure as Error).message).toContain("flow")
-	})
-
-	test("reads no children for a job it delivers", async () => {
-		const driver = memoryDriver()
-		const jobs = createJobs({ driver })
-		const read: unknown[] = []
-
-		await jobs.start([
-			defineHandler(sendInvoice, async (_data, context) => {
-				read.push(...(await context.children(renderPdf)))
-			}),
-		])
-
-		await driver.enqueue({ queue: "billing", envelope: flowEnvelope, delivery: DELIVERY_DEFAULTS })
-		await driver.drain()
-
-		expect(read).toEqual([])
-	})
-})
-
-const settleOnce = defineJob({
-	name: "invoice.settle",
-	queue: "billing",
-	payload: type({ id: "string" }),
-	idempotencyKey: (data) => data.id,
-})
-
-describe("idempotencyKey inside a flow", () => {
-	test("refuses a node that waits on children, whose input is more than its payload", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const failure = await jobs
-			.flow(settleOnce, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("invoice.settle")
-		expect((failure as Error).message).toContain("idempotencyKey")
-		expect(driver.flows).toEqual([])
-	})
-
-	test("refuses a child that waits on children of its own", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const failure = await jobs
-			.flow(
-				sendInvoice,
-				{ id: "inv-1" },
+			.enqueue(
+				zipExport,
+				{ run_id: "r-1" },
 				{
-					children: [
-						childJob(
-							settleOnce,
-							{ id: "inv-1" },
-							{ children: [childJob(renderPdf, { id: "inv-1" })] },
-						),
-					],
+					xmls: [{ page: 1 }],
+					manifest: { data: { run_id: "r-1" }, awaits: { row: { row: 7 } } },
 				},
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("invoice.settle")
-		expect(driver.flows).toEqual([])
+		expect((failure as Error).message).toContain("memoryDriver does not simulate")
+		expect((failure as Error).message).toContain("waits on children")
 	})
 
-	test("keeps the key of a leaf, whose input really is its payload alone", async () => {
-		const driver = recordingDriver()
+	test("refuses to say what the children of a job it delivers settled into", async () => {
+		const driver = memoryDriver()
 		const jobs = createJobs({ driver })
+		let ran = false
 
-		await jobs.flow(
-			sendInvoice,
-			{ id: "inv-1" },
-			{ children: [childJob(settleOnce, { id: "inv-1" })] },
-		)
+		await jobs.start([
+			defineHandler(zipExport, async () => {
+				ran = true
 
-		expect(driver.flows[0]?.children[0]?.envelope.name).toBe("invoice.settle")
-	})
-})
+				return { url: "https://a.example/1" }
+			}),
+		])
 
-describe("dead.replay of a flow job", () => {
-	test("refuses it, and names the repair path in job ids", async () => {
-		const driver = driverOnFlowState({
-			results: [],
-			failures: [
-				{
-					id: "billing:invoice.charge~ab",
-					name: "invoice.charge",
-					reason: "the card was declined",
-				},
-			],
-		})
+		await driver.enqueue({ queue: "nfe", envelope: zipEnvelope, delivery: DELIVERY_DEFAULTS })
 
-		const jobs = createJobs({ driver, deadQueues: ["billing"], definitions: [sendInvoice] })
+		const failure = await driver.drain().catch((error: unknown) => error)
 
-		await jobs.start([defineHandler(sendInvoice, async () => {})])
-
-		await driver.enqueue({ queue: "billing", envelope: flowEnvelope, delivery: DELIVERY_DEFAULTS })
-		await driver.runNext().catch(() => {})
-
-		const buried = await jobs.dead.list("billing")
-		const failure = await jobs.dead.replay(buried[0]?.id ?? "").catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("billing:1")
-		expect((failure as Error).message).toContain("jobs.retry")
-		expect((failure as Error).message).toContain("jobs.dead.discard")
-		expect(buried[0]?.error.message).toContain("billing:invoice.charge~ab")
-		expect(await jobs.dead.list("billing")).toHaveLength(1)
-	})
-})
-
-describe("a definition name a job id cannot carry", () => {
-	test("refuses a child whose name holds a colon, which Redis itself would refuse", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const colon = defineJob({
-			name: "billing:invoice.render",
-			queue: "documents",
-			payload: type({ id: "string" }),
-		})
-
-		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(colon, { id: "inv-1" })] })
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("billing:invoice.render")
-		expect((failure as Error).message).toContain('":"')
-		expect(driver.flows).toEqual([])
-	})
-
-	test("refuses a child whose name holds the character that cuts the id", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const tilde = defineJob({
-			name: "invoice~render",
-			queue: "documents",
-			payload: type({ id: "string" }),
-		})
-
-		const failure = await jobs
-			.flow(sendInvoice, { id: "inv-1" }, { children: [childJob(tilde, { id: "inv-1" })] })
-			.catch((error: unknown) => error)
-
-		expect((failure as Error).message).toContain("invoice~render")
-		expect(driver.flows).toEqual([])
-	})
-
-	test("leaves a root name alone, because a root carries no id of ours", async () => {
-		const driver = recordingDriver()
-		const jobs = createJobs({ driver })
-
-		const colon = defineJob({
-			name: "billing:invoice.send",
-			queue: "billing",
-			payload: type({ id: "string" }),
-		})
-
-		await jobs.flow(colon, { id: "inv-1" }, { children: [childJob(renderPdf, { id: "inv-1" })] })
-
-		expect(driver.flows[0]?.envelope.name).toBe("billing:invoice.send")
+		expect((failure as Error).message).toContain("memoryDriver does not simulate")
+		expect((failure as Error).message).toContain("children of a job that waits on children")
+		expect(ran).toBe(false)
 	})
 })

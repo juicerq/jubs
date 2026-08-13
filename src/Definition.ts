@@ -1,5 +1,6 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import type { DeliveryPolicy } from "@/Delivery"
+import { FLOW_ID_MARKER } from "@/JobId"
 import type { PayloadMigration } from "@/Migration"
 import type { Schedule } from "@/Schedule"
 
@@ -7,7 +8,102 @@ export const DEFAULT_PAYLOAD_VERSION = 1
 
 export type Origin = "direct" | "schedule" | "flow" | "relay"
 
-export interface HandlerContext {
+/**
+ * What a definition waits on, slot by slot. The shape of a slot declares its
+ * arity: a bare definition is exactly one child, and an array literal holding
+ * one definition is many of them.
+ *
+ * The slot, not the definition, is what names a child everywhere after this —
+ * in the id Redis stores it under, in the results the handler reads and in the
+ * failure that buries the parent — so two slots holding the very same
+ * definition stay apart.
+ */
+export type AwaitsMap = Readonly<Record<string, AnyDefinition | readonly [AnyDefinition]>>
+
+/**
+ * A definition with every type parameter at its widest, which is what a slot of
+ * an `AwaitsMap` holds. Writing it out is what lets `AwaitsMap` name
+ * `JobDefinition` while `JobDefinition` names `AwaitsMap` back.
+ */
+export type AnyDefinition = JobDefinition<
+	StandardSchemaV1,
+	string,
+	StandardSchemaV1 | undefined,
+	AwaitsMap | undefined
+>
+
+type PayloadOf<Definition> =
+	Definition extends JobDefinition<infer Payload> ? StandardSchemaV1.InferInput<Payload> : never
+
+type AwaitsOf<Definition> =
+	Definition extends JobDefinition<
+		StandardSchemaV1,
+		string,
+		StandardSchemaV1 | undefined,
+		infer Awaits
+	>
+		? Awaits
+		: never
+
+type ResultOf<Definition> =
+	Definition extends JobDefinition<StandardSchemaV1, string, infer Result>
+		? Result extends StandardSchemaV1
+			? StandardSchemaV1.InferOutput<Result>
+			: unknown
+		: never
+
+/**
+ * What one child of a slot takes: its payload alone when it waits on nothing,
+ * and its payload beside what its own slots take when it does. That is where
+ * the recursion lives — a flow of any depth is this type applied again.
+ */
+type SlotInput<Definition> =
+	AwaitsOf<Definition> extends AwaitsMap
+		? { readonly data: PayloadOf<Definition>; readonly awaits: SlotInputs<AwaitsOf<Definition>> }
+		: PayloadOf<Definition>
+
+type SlotInputs<Awaits extends AwaitsMap> = {
+	readonly [Slot in keyof Awaits]: Awaits[Slot] extends readonly [infer Child]
+		? readonly SlotInput<Child>[]
+		: SlotInput<Awaits[Slot]>
+}
+
+/**
+ * What fills every slot of a definition — the third argument `jobs.enqueue`
+ * takes from a definition that declares `awaits`.
+ *
+ * Annotate a pre-built input with it. An input written straight inside the call
+ * is checked against the slot it fills, so a typo names that slot; the same
+ * input built in a `const` first is checked as a whole afterwards, and the
+ * error becomes a wall as deep as the tree. `const input: AwaitsInput<typeof
+ * zipNfeExport> = { ... }` puts the leaf error back.
+ */
+export type AwaitsInput<Definition> =
+	AwaitsOf<Definition> extends AwaitsMap ? SlotInputs<AwaitsOf<Definition>> : Record<string, never>
+
+/**
+ * What each slot of a definition read back inside its handler: one validated
+ * value for a slot declared as a bare definition, and an array for a slot
+ * declared as an array.
+ */
+export type Children<Awaits extends AwaitsMap> = {
+	readonly [Slot in keyof Awaits]: Awaits[Slot] extends readonly [infer Child]
+		? readonly ResultOf<Child>[]
+		: ResultOf<Awaits[Slot]>
+}
+
+/**
+ * The trailing arguments `jobs.enqueue` takes for a definition. A definition
+ * that waits on nothing takes none, and `awaits: {}` is a definition that waits
+ * on nothing — the slots, not the key, are what make a flow.
+ */
+export type EnqueueAwaits<Awaits extends AwaitsMap | undefined> = Awaits extends AwaitsMap
+	? keyof Awaits extends never
+		? []
+		: [awaits: SlotInputs<Awaits>]
+	: []
+
+export interface HandlerContext<Awaits extends AwaitsMap | undefined = AwaitsMap> {
 	/**
 	 * The id of this job, in the one form the whole API speaks: the same string
 	 * `jobs.enqueue` gave the producer, and the one `jobs.get`, `jobs.retry` and
@@ -18,19 +114,16 @@ export interface HandlerContext {
 	readonly maxAttempts: number
 	readonly origin: Origin
 	/**
-	 * The results the children of this job returned, for the one definition
-	 * asked, in the order Redis kept them. What comes back is the JSON projection
-	 * of what each child's handler returned, put through that definition's
-	 * `result` schema — so a `Date` a child returned comes back as the schema
-	 * reads it, and a value the schema refuses fails this job for good.
+	 * What the children this job waited on returned, under the slot each one
+	 * fills. What comes back is the JSON projection of what a child's handler
+	 * returned, put through that child definition's `result` schema — so a `Date`
+	 * a child returned comes back as the schema reads it.
 	 *
-	 * Only the children of this very job answer, and only those the asked
-	 * definition ran: two definitions sharing a queue stay apart. A job that is
-	 * no part of a flow reads empty, and touches Redis for nothing.
+	 * Every slot is read and validated before the handler runs, so a value a
+	 * schema refuses fails this job for good with no handler code having run. A
+	 * definition that declares no `awaits` reads an empty object.
 	 */
-	readonly children: <Result extends StandardSchemaV1 | undefined>(
-		definition: JobDefinition<StandardSchemaV1, string, Result>,
-	) => Promise<(Result extends StandardSchemaV1 ? StandardSchemaV1.InferOutput<Result> : unknown)[]>
+	readonly children: Awaits extends AwaitsMap ? Children<Awaits> : Record<string, never>
 	/**
 	 * Aborts when the job's `timeoutMs` expires, when `jobs.cancel(id)` reaches
 	 * this job, and when `close({ timeoutMs })` runs out of patience during a
@@ -50,6 +143,7 @@ export interface JobDefinition<
 	Payload extends StandardSchemaV1 = StandardSchemaV1,
 	Queue extends string = string,
 	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+	Awaits extends AwaitsMap | undefined = AwaitsMap | undefined,
 > {
 	readonly name: string
 	readonly queue: Queue
@@ -62,6 +156,13 @@ export interface JobDefinition<
 	 * `result` validates nothing, and its handler returns `unknown`.
 	 */
 	readonly result?: Result
+	/**
+	 * The jobs this one waits on, under the slot each one fills. Declaring it
+	 * makes every enqueue of this job a flow: `jobs.enqueue` then takes what
+	 * fills every slot as its third argument, and the handler reads what they
+	 * returned under the same slots.
+	 */
+	readonly awaits?: Awaits
 	readonly version?: number
 	readonly migrations?: Readonly<Record<number, PayloadMigration>>
 	readonly delivery?: DeliveryPolicy
@@ -74,7 +175,11 @@ export interface JobDefinitionInput<
 	Payload extends StandardSchemaV1,
 	Queue extends string = string,
 	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
-> extends Omit<JobDefinition<Payload, Queue, Result>, "delivery" | "schedule" | "idempotencyKey"> {
+	Awaits extends AwaitsMap | undefined = AwaitsMap | undefined,
+> extends Omit<
+		JobDefinition<Payload, Queue, Result, Awaits>,
+		"delivery" | "schedule" | "idempotencyKey"
+	> {
 	readonly delivery?: DeliveryPolicy<StandardSchemaV1.InferOutput<Payload>>
 	readonly schedule?: Schedule<StandardSchemaV1.InferInput<Payload>>
 	readonly idempotencyKey?: (data: StandardSchemaV1.InferOutput<Payload>) => string
@@ -92,9 +197,10 @@ export interface JobHandler<Queue extends string = string> {
 export type HandlerRun<
 	Payload extends StandardSchemaV1,
 	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+	Awaits extends AwaitsMap | undefined = AwaitsMap | undefined,
 > = (
 	data: StandardSchemaV1.InferOutput<Payload>,
-	context: HandlerContext,
+	context: HandlerContext<Awaits>,
 ) => Promise<Result extends StandardSchemaV1 ? StandardSchemaV1.InferInput<Result> : unknown>
 
 function strayMigration(name: string, from: string, version: number): Error {
@@ -149,17 +255,79 @@ function assertTimeout(definition: Pick<JobDefinition, "name" | "timeoutMs">): v
 	)
 }
 
+/**
+ * The rules a definition that waits on children has to hold, all of them known
+ * from the definition alone.
+ *
+ * `unique`, `idempotencyKey` and `schedule` are refused here because waiting on
+ * children is now a property of the definition, not of one enqueue. Uniqueness
+ * does not apply anywhere inside a flow; a key derived from the payload alone
+ * cannot name a run whose input is its children as much as its payload; and a
+ * recurrence has no producer to fill the slots with.
+ *
+ * A `delivery` written as a function is not read: it takes the payload of a job
+ * that has not been enqueued yet. The composition of a flow resolves it and
+ * refuses `unique` again, at every node, which is what covers that case.
+ */
+function assertAwaits<Payload extends StandardSchemaV1>(
+	input: Pick<
+		JobDefinitionInput<Payload>,
+		"name" | "awaits" | "delivery" | "idempotencyKey" | "schedule"
+	>,
+): void {
+	const slots = Object.keys(input.awaits ?? {})
+
+	if (slots.length === 0) {
+		return
+	}
+
+	const policy = input.delivery
+
+	if (typeof policy === "object" && policy.unique) {
+		throw new Error(
+			`jubs: the job "${input.name}" declares \`unique\` and \`awaits\` — uniqueness does not apply inside a flow, at any position, and a job that waits on children is a flow, so drop \`unique\` from its delivery or drop \`awaits\` from that definition`,
+		)
+	}
+
+	if (input.idempotencyKey) {
+		throw new Error(
+			`jubs: the job "${input.name}" declares \`idempotencyKey\` and \`awaits\` — a key derived from the payload alone would replay the result of an earlier flow that ran different children, so drop \`idempotencyKey\` from that definition or give the key to the jobs it waits on instead`,
+		)
+	}
+
+	if (input.schedule) {
+		throw new Error(
+			`jubs: the job "${input.name}" declares \`schedule\` and \`awaits\` — a recurrence enqueues this job on its own, with nothing to fill its slots, every tick would run over children it never had — drop \`schedule\` from that definition and give it to a job that waits on nothing, which enqueues this flow with jobs.enqueue`,
+		)
+	}
+
+	for (const slot of slots) {
+		const stray = [":", FLOW_ID_MARKER].find((character) => slot.includes(character))
+
+		if (stray) {
+			throw new Error(
+				`jubs: the job "${input.name}" waits on the slot "${slot}", whose name holds "${stray}" — a child is stored under an id built from the slot it fills, which that character breaks, so rename the slot`,
+			)
+		}
+	}
+}
+
 export function defineJob<
 	Payload extends StandardSchemaV1,
 	const Queue extends string = string,
 	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
->(input: JobDefinitionInput<Payload, Queue, Result>): JobDefinition<Payload, Queue, Result> {
+	Awaits extends AwaitsMap | undefined = undefined,
+>(
+	input: JobDefinitionInput<Payload, Queue, Result, Awaits>,
+): JobDefinition<Payload, Queue, Result, Awaits> {
 	assertVersioning(input)
 	assertTimeout(input)
+	assertAwaits(input)
 
 	const named = { name: input.name, queue: input.queue, payload: input.payload }
 	const resulting = input.result ? { ...named, result: input.result } : named
-	const versioned = input.version ? { ...resulting, version: input.version } : resulting
+	const awaiting = input.awaits ? { ...resulting, awaits: input.awaits } : resulting
+	const versioned = input.version ? { ...awaiting, version: input.version } : awaiting
 	const migrating = input.migrations ? { ...versioned, migrations: input.migrations } : versioned
 	const scheduled = input.schedule ? { ...migrating, schedule: input.schedule } : migrating
 	const timed = input.timeoutMs ? { ...scheduled, timeoutMs: input.timeoutMs } : scheduled
@@ -179,9 +347,10 @@ export function defineHandler<
 	Payload extends StandardSchemaV1,
 	Queue extends string = string,
 	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
+	Awaits extends AwaitsMap | undefined = AwaitsMap | undefined,
 >(
-	definition: JobDefinition<Payload, Queue, Result>,
-	run: HandlerRun<Payload, Result>,
+	definition: JobDefinition<Payload, Queue, Result, Awaits>,
+	run: HandlerRun<Payload, Result, Awaits>,
 ): JobHandler<Queue> {
 	return { definition, run: run as JobHandler["run"] }
 }

@@ -12,6 +12,22 @@ export interface Envelope {
 	readonly name: string
 	readonly data: unknown
 	readonly origin: Origin
+	/**
+	 * How many children each slot of this job was enqueued with, written for
+	 * every node of a flow that waits on something.
+	 *
+	 * Redis keeps no record of the shape a parent was given: the only write is
+	 * one member per child in the parent's `:dependencies`, and a child that is
+	 * cancelled or removed is taken out of that set with nothing left behind. A
+	 * slot that lost a child is then byte-for-byte a slot enqueued smaller. This
+	 * field is the only place the declared shape survives, so the dispatch can
+	 * tell the two apart and refuse to run a handler over a slot that went short.
+	 *
+	 * It is optional because it is a stored format, the way `v` is: an envelope
+	 * written by a build where this job waited on nothing carries none, and that
+	 * absence is read for what it is — a job that has no children at all.
+	 */
+	readonly slots?: Readonly<Record<string, number>>
 	readonly trace?: TraceContext
 }
 
@@ -24,6 +40,36 @@ export class EnvelopeError extends Error {
 
 function isOrigin(value: unknown): value is Origin {
 	return ORIGINS.includes(value as Origin)
+}
+
+/**
+ * Reads the child counts back, refusing anything that is not a count.
+ *
+ * A malformed record is refused rather than dropped, because absence is a
+ * decision the dispatch acts on: an envelope whose counts were read as missing
+ * would be buried as one written before this job waited on children, which is a
+ * different fact and a different fix.
+ */
+function readSlots(stored: unknown): Readonly<Record<string, number>> | undefined {
+	if (stored === undefined) {
+		return undefined
+	}
+
+	if (typeof stored !== "object" || stored === null || Array.isArray(stored)) {
+		throw new EnvelopeError(`its child counts ${JSON.stringify(stored)} are not an object`)
+	}
+
+	const counts = Object.entries(stored as Record<string, unknown>)
+
+	const stray = counts.find(([, count]) => typeof count !== "number" || !Number.isInteger(count))
+
+	if (stray) {
+		throw new EnvelopeError(
+			`its child count for the slot "${stray[0]}" is ${JSON.stringify(stray[1])}, which is not a whole number of children`,
+		)
+	}
+
+	return Object.fromEntries(counts) as Readonly<Record<string, number>>
 }
 
 export function readEnvelope(stored: unknown): Envelope {
@@ -45,5 +91,18 @@ export function readEnvelope(stored: unknown): Envelope {
 		throw new EnvelopeError(`its origin ${JSON.stringify(envelope.origin)} is not a known origin`)
 	}
 
-	return { v: envelope.v, name: envelope.name, data: envelope.data, origin: envelope.origin }
+	const read: Envelope = {
+		v: envelope.v,
+		name: envelope.name,
+		data: envelope.data,
+		origin: envelope.origin,
+	}
+
+	const slots = readSlots(envelope.slots)
+
+	if (!slots) {
+		return read
+	}
+
+	return { ...read, slots }
 }

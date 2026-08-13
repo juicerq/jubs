@@ -274,6 +274,41 @@ describe("inspecting and replaying a dead job", () => {
 		expect((failure as Error).message).toContain("createJobs({ definitions })")
 	})
 
+	test("replay refuses a job whose definition waits on children, whatever its envelope says", async () => {
+		const driver = memoryDriver()
+
+		const signRow = defineJob({
+			name: "nfe.sign-row",
+			queue: "signing",
+			payload: type({ row: "number" }),
+			result: type({ signed: "boolean" }),
+		})
+
+		const buildManifest = defineJob({
+			name: "nfe.manifest",
+			queue: "documents",
+			payload: type({ run_id: "string" }),
+			awaits: { row: signRow },
+		})
+
+		const jobs = createJobs({ driver, deadQueues: ["documents"], definitions: [buildManifest] })
+
+		await driver.dead.bury("documents", {
+			jobId: "documents:1",
+			envelope: { v: 1, name: "nfe.manifest", data: { run_id: "r_1" }, origin: "direct" },
+			error: { name: "ChildrenShortError", message: "a slot holds fewer children" },
+			reason: "children_short",
+		})
+
+		const [dead] = await jobs.dead.list("documents")
+		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
+
+		expect((failure as Error).message).toContain("nfe.manifest")
+		expect((failure as Error).message).toContain("children_short")
+		expect((failure as Error).message).toContain("jobs.enqueue(definition, data, awaits)")
+		expect(await jobs.dead.list("documents")).toHaveLength(1)
+	})
+
 	test("discard drops the dead job, and refuses an id no dead job answers to", async () => {
 		const driver = memoryDriver()
 		const jobs = createJobs({ driver, deadQueues: ["billing"] })

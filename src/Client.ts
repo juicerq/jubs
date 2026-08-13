@@ -1,9 +1,15 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
 import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
-import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
+import {
+	type AwaitsMap,
+	type EnqueueAwaits,
+	type JobDefinition,
+	type JobHandler,
+	payloadVersion,
+} from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type { CancelResult, EnqueuedJob, JobDriver, JobSnapshot, RetryResult } from "@/Driver"
-import { childJob, composeFlow, type FlowChildren } from "@/Flow"
+import { composeFlow, slotsOf } from "@/Flow"
 import type { JobHooks } from "@/Hooks"
 import { composeJobId, readJobId } from "@/JobId"
 import { migrateEnvelope } from "@/Migration"
@@ -20,29 +26,31 @@ export interface JobsConfig {
 }
 
 export interface JobsClient {
-	enqueue<Payload extends StandardSchemaV1>(
-		definition: JobDefinition<Payload>,
-		data: StandardSchemaV1.InferInput<Payload>,
-	): Promise<EnqueuedJob>
 	/**
-	 * Enqueues a job that waits on the children `childJob(...)` describes, nesting to
-	 * any depth and across queues, and gives back the id of the parent — the same
-	 * form `enqueue` gives back.
+	 * Enqueues one job, and gives back the id it answers to.
 	 *
-	 * Inside the parent's handler, `context.children(definition)` reads what those
-	 * children returned. A child that fails every attempt does not fail the parent
-	 * inside Redis: the parent runs, finds the failure, and is buried with the
-	 * reason `child_dead`, which buries its own parent in turn.
+	 * A definition that declares `awaits` takes a third argument: what fills every
+	 * one of its slots, nesting to any depth and across queues. The whole tree is
+	 * added in one step, and the id that comes back is the parent's — the job the
+	 * producer holds. Annotate a pre-built input with `AwaitsInput<typeof
+	 * definition>`, so a mistake names the slot it is in.
 	 *
-	 * A definition declaring `unique` cannot take part in a flow, at any position,
-	 * and a definition declaring `idempotencyKey` cannot be a node that waits on
-	 * children — its children are part of its input, and its payload alone does
-	 * not name the run.
+	 * Inside the parent's handler, `context.children` reads what those children
+	 * returned, slot by slot. A child that fails every attempt does not fail the
+	 * parent inside Redis: the parent runs, finds the failure, and is buried with
+	 * the reason `child_dead`, which buries its own parent in turn.
+	 *
+	 * A definition declaring `unique` cannot take part in a flow, at any position.
 	 */
-	flow<Payload extends StandardSchemaV1>(
-		definition: JobDefinition<Payload>,
+	enqueue<
+		Payload extends StandardSchemaV1,
+		Queue extends string,
+		Result extends StandardSchemaV1 | undefined,
+		Awaits extends AwaitsMap | undefined,
+	>(
+		definition: JobDefinition<Payload, Queue, Result, Awaits>,
 		data: StandardSchemaV1.InferInput<Payload>,
-		options?: FlowChildren,
+		...awaits: EnqueueAwaits<Awaits>
 	): Promise<EnqueuedJob>
 	start<Queue extends string>(
 		handlers: JobHandler<Queue>[],
@@ -60,7 +68,9 @@ export interface JobsClient {
 	 * is not failed.
 	 *
 	 * An id naming a dead queue reads `unknown_job`: a dead job is replayed with
-	 * `jobs.dead.replay(id)`, which rebuilds it from its envelope.
+	 * `jobs.dead.replay(id)`, which rebuilds it from its envelope alone and so only
+	 * serves a job that runs alone: a dead job that is part of a flow, or one whose
+	 * definition waits on children, is refused.
 	 */
 	retry(id: string): Promise<RetryResult>
 	/**
@@ -191,6 +201,12 @@ export function createJobs(config: JobsConfig): JobsClient {
 					)
 				}
 
+				if (slotsOf(definition).length > 0) {
+					throw new Error(
+						`jubs: the dead job "${id}" runs "${entry.envelope.name}", which waits on children, and replaying it would enqueue that job alone, with no children at all — the first delivery would find its slots short and bury it again with the reason children_short. Enqueue the flow again with jobs.enqueue(definition, data, awaits), which builds the whole flow. This dead record stays where it is — drop it with jobs.dead.discard(id).`,
+					)
+				}
+
 				const migrated = await migrateEnvelope(definition, entry.envelope)
 				const validated = await validatePayload(definition, migrated)
 
@@ -217,7 +233,14 @@ export function createJobs(config: JobsConfig): JobsClient {
 			},
 		},
 
-		async enqueue(definition, data) {
+		async enqueue(definition, data, ...awaits) {
+			if (slotsOf(definition).length > 0) {
+				const root = await composeFlow(definition, data, awaits[0])
+				const flowed = await config.driver.flow.enqueue(root)
+
+				return { id: composeJobId(definition.queue, flowed.id) }
+			}
+
 			const validated = await validatePayload(definition, data)
 
 			const enqueued = await config.driver.enqueue({
@@ -225,13 +248,6 @@ export function createJobs(config: JobsConfig): JobsClient {
 				envelope: { v: payloadVersion(definition), name: definition.name, data, origin: "direct" },
 				delivery: resolveDelivery(definition, validated),
 			})
-
-			return { id: composeJobId(definition.queue, enqueued.id) }
-		},
-
-		async flow(definition, data, options) {
-			const root = await composeFlow(childJob(definition, data, options))
-			const enqueued = await config.driver.flow.enqueue(root)
 
 			return { id: composeJobId(definition.queue, enqueued.id) }
 		},

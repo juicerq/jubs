@@ -21,17 +21,26 @@ export interface EnqueuedJob {
  * the children are what make it a flow.
  */
 export interface FlowNode extends EnqueueRequest {
-	readonly children: readonly FlowNode[]
+	readonly children: readonly FlowChildNode[]
 }
 
 /**
- * What one child of a flow gave back. `name` is the name of the definition that
- * ran, and `value` the JSON projection of what its handler returned — what
- * Redis stored, before any `result` schema has seen it.
+ * A node of a flow that is not the root, and the slot of its parent's `awaits`
+ * it fills. Only the root fills no slot, which is why it is a type apart: the
+ * slot is what the child is stored under and what the parent reads it back by,
+ * so a child without one cannot exist.
+ */
+export interface FlowChildNode extends FlowNode {
+	readonly slot: string
+}
+
+/**
+ * What one child of a flow gave back. `slot` is the slot of its parent's
+ * `awaits` it filled, and `value` the JSON projection of what its handler
+ * returned — what Redis stored, before any `result` schema has seen it.
  */
 export interface ChildResult {
-	readonly queue: string
-	readonly name: string
+	readonly slot: string
 	readonly value: unknown
 }
 
@@ -46,17 +55,29 @@ export interface ChildResult {
  */
 export interface ChildFailure {
 	readonly id: string
-	readonly name: string
+	readonly slot: string
 	readonly reason: string
 }
 
 /**
  * What the children of one flow job settled into, read in one step: the results
- * of those that finished, and the failures of those that did not.
+ * of those that finished, the failures of those that did not, and how many have
+ * settled into neither yet.
  */
 export interface FlowState {
 	readonly results: readonly ChildResult[]
 	readonly failures: readonly ChildFailure[]
+	/**
+	 * How many children this job still waits on at the moment of the read.
+	 *
+	 * It is normally 0 — a parent is moved out of `waiting-children` only once
+	 * its dependencies empty. It is not always 0: a parent retried while a child
+	 * it lost is running again is delivered with that child still in flight, and
+	 * a handler run over the slot it has not filled yet would have its completion
+	 * refused by Redis anyway. Reading it is what lets that attempt fail before
+	 * the handler's side effects happen instead of after.
+	 */
+	readonly pending: number
 }
 
 /**

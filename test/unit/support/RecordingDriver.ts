@@ -63,7 +63,7 @@ export function recordingDriver(): RecordingDriver {
 	const enqueued: RecordedEnqueue[] = []
 	const flows: FlowNode[] = []
 	const flowReads: RecordedFlowRead[] = []
-	let flowState: FlowState = { results: [], failures: [] }
+	let flowState: FlowState = { results: [], failures: [], pending: 0 }
 	const consumed: ConsumeRequest[] = []
 	const reconciled: ReconcileRequest[] = []
 	let refusing = false

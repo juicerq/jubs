@@ -47,6 +47,18 @@ describe("defineJob", () => {
 		expect(sweep.schedule).toEqual({ recurrence: { pattern: "0 7 * * *" }, timezone: "UTC" })
 	})
 
+	test("refuses a schedule beside awaits, because a tick fills no slot", () => {
+		expect(() =>
+			defineJob({
+				name: "email.recap",
+				queue: "mail",
+				payload: emailPayload,
+				schedule: dailyAt("07:00", { data: { to: "ada@example.com", subject: "recap" } }),
+				awaits: { sent: sendEmail },
+			}),
+		).toThrow("declares `schedule` and `awaits`")
+	})
+
 	test("leaves the version and migration keys off a definition that names no version", () => {
 		expect(Object.keys(sendEmail)).not.toContain("version")
 		expect(Object.keys(sendEmail)).not.toContain("migrations")
@@ -170,7 +182,7 @@ describe("defineHandler", () => {
 				attempt: 1,
 				maxAttempts: 5,
 				origin: "direct",
-				children: async () => [],
+				children: {},
 				signal: new AbortController().signal,
 			},
 		)

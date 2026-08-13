@@ -22,6 +22,7 @@ import type {
 	ChildFailure,
 	ChildResult,
 	ConsumeRequest,
+	FlowChildNode,
 	FlowNode,
 	FlowState,
 	JobDriver,
@@ -29,14 +30,13 @@ import type {
 	ScheduleUpsert,
 } from "@/Driver"
 import { type Envelope, readEnvelope } from "@/Envelope"
-import { FLOW_ID_MARKER } from "@/Flow"
 import {
 	type IdempotencyLease,
 	type IdempotencyStore,
 	type KeptResult,
 	LeaseHeldError,
 } from "@/Idempotency"
-import { composeJobId } from "@/JobId"
+import { composeChildId, composeJobId, readChildSlot } from "@/JobId"
 import { ShutdownAbortError } from "@/Shutdown"
 
 const SCHEDULER_PREFIX = "jubs."
@@ -125,24 +125,22 @@ return taken
  * Reads what the children of one flow job settled into, in one round trip.
  *
  * The two hashes BullMQ keeps on a parent are both keyed by the child's full
- * job key, and neither holds the child's job name, so the name is read off each
- * child's own hash inside the same script. Reading it here is what keeps the
- * whole state one call instead of one call per child.
+ * job key, and a child's key holds its id, which holds the slot it fills. So
+ * the two hashes say everything, and no child's own hash is read at all — which
+ * is what makes this correct rather than merely short: a completed child is
+ * swept by its `removeOnComplete` while its value stays in `:processed`, and a
+ * read that went to the child's hash would find nothing there.
+ *
+ * The `:dependencies` set is read in the same trip, because the two hashes only
+ * say what has settled. A child that is neither in them nor gone is still in
+ * flight, and its slot is empty for a reason that will not last.
  */
 const READ_FLOW_LUA = `
 local processed = redis.call("HGETALL", KEYS[1] .. ":processed")
 local failed = redis.call("HGETALL", KEYS[1] .. ":failed")
-local names = {}
+local pending = redis.call("SCARD", KEYS[1] .. ":dependencies")
 
-for index = 1, #processed, 2 do
-  names[#names + 1] = redis.call("HGET", processed[index], "name") or ""
-end
-
-for index = 1, #failed, 2 do
-  names[#names + 1] = redis.call("HGET", failed[index], "name") or ""
-end
-
-return { processed, failed, names }
+return { processed, failed, pending }
 `
 
 function schedulerId(jobName: string): string {
@@ -269,25 +267,19 @@ export function toFlowJob(node: FlowNode): FlowJobNode {
 }
 
 /**
- * Every node but the root is stored under an id that starts with its own
- * definition name.
- *
- * A completed child is swept by its `removeOnComplete`, and its hash goes with
- * it, while the value it returned stays in its parent's `:processed`. The name
- * is only in the hash, so a parent that outlives a swept child would read a
- * result it cannot attribute and drop it — a short `children(definition)` with
- * no error and no burial. The id is in the key of that hash entry, so a name
- * carried there survives the sweep. The producer already assigns a random id to
- * every node, so naming it ourselves changes nothing else.
+ * Every node but the root is stored under an id built from the slot it fills,
+ * so its parent can attribute the value it left behind. The producer already
+ * assigns a random id to every node, so naming it ourselves changes nothing
+ * else.
  */
-function toDependentFlowJob(node: FlowNode): FlowJobNode {
+function toDependentFlowJob(node: FlowChildNode): FlowJobNode {
 	const job = toFlowJob(node)
 
 	return {
 		...job,
 		opts: {
 			...job.opts,
-			jobId: `${node.envelope.name}${FLOW_ID_MARKER}${randomUUID()}`,
+			jobId: composeChildId(node.slot),
 			ignoreDependencyOnFailure: true,
 		},
 	}
@@ -463,27 +455,6 @@ function readChildKey(key: string): { queue: string; storedId: string } {
  * nothing stored nothing readable, and reads back as `undefined` — the parse is
  * our own for that very reason, since BullMQ's `getChildrenValues` throws on it.
  */
-/**
- * The definition a child ran, read off its own hash when Redis still holds it,
- * and off its job id when the sweep already took the hash away.
- *
- * The hash stays the primary source on purpose. A flow already in flight when
- * this rule shipped has children under plain uuids, which carry no name at all
- * — dropping the hash read would lose exactly those, which is the very loss
- * this guards against, only somewhere new.
- */
-function childName(stored: unknown, storedId: string): string {
-	const name = String(stored ?? "")
-
-	if (name) {
-		return name
-	}
-
-	const cut = storedId.indexOf(FLOW_ID_MARKER)
-
-	return cut < 1 ? "" : storedId.slice(0, cut)
-}
-
 function childValue(stored: string): unknown {
 	try {
 		return JSON.parse(stored)
@@ -501,32 +472,25 @@ function hashEntries(reply: unknown): { key: string; value: string }[] {
 }
 
 export function readFlowState(reply: unknown): FlowState {
-	const [processed, failed, names] = Array.isArray(reply) ? reply : []
-	const done = hashEntries(processed)
-	const gone = hashEntries(failed)
-	const named: unknown[] = Array.isArray(names) ? names : []
+	const [processed, failed, pending] = Array.isArray(reply) ? reply : []
 
-	const results: ChildResult[] = done.map((entry, index) => {
-		const { queue, storedId } = readChildKey(entry.key)
+	const results: ChildResult[] = hashEntries(processed).map((entry) => {
+		const { storedId } = readChildKey(entry.key)
 
-		return {
-			queue,
-			name: childName(named[index], storedId),
-			value: childValue(entry.value),
-		}
+		return { slot: readChildSlot(storedId), value: childValue(entry.value) }
 	})
 
-	const failures: ChildFailure[] = gone.map((entry, index) => {
+	const failures: ChildFailure[] = hashEntries(failed).map((entry) => {
 		const { queue, storedId } = readChildKey(entry.key)
 
 		return {
 			id: composeJobId(queue, storedId),
-			name: childName(named[done.length + index], storedId),
+			slot: readChildSlot(storedId),
 			reason: entry.value,
 		}
 	})
 
-	return { results, failures }
+	return { results, failures, pending: typeof pending === "number" ? pending : 0 }
 }
 
 /**

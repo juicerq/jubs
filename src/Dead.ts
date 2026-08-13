@@ -2,12 +2,24 @@ import type { ChildResult } from "@/Driver"
 import type { Envelope } from "@/Envelope"
 import type { SerializedError } from "@/Failure"
 
+/**
+ * Why a job was buried.
+ *
+ * `child_dead` and `children_short` are the two ways a flow's parent dies over
+ * its children, and they are apart because the fixes are apart. `child_dead` is
+ * a child that ran and failed every attempt: the child is named, and retrying it
+ * puts the flow back together. `children_short` is a slot holding fewer children
+ * than it was enqueued with, and there is nothing to retry — the missing child
+ * was cancelled, removed, or never enqueued at all, so the flow is enqueued
+ * again from the top.
+ */
 export type DeadReason =
 	| "attempts_exhausted"
 	| "unrecoverable"
 	| "version_ahead"
 	| "cancelled"
 	| "child_dead"
+	| "children_short"
 
 export interface DeadEntry {
 	/**
