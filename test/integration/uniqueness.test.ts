@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { liveId } from "../support/JobIds"
 import { scoped } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -140,7 +141,7 @@ describe("uniqueness over redis", () => {
 
 		await waitFor(() => ran.length === 2)
 
-		expect(first.id).not.toBe(second.id)
+		expect(liveId(first)).not.toBe(liveId(second))
 		expect(ran).toEqual(["ada@example.com", "ada@example.com"])
 
 		await runtime.close()

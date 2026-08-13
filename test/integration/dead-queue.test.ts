@@ -4,6 +4,7 @@ import { type Job, Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
+import { liveId } from "../support/JobIds"
 import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -175,7 +176,7 @@ describe("dead queue over redis", () => {
 		const replayed = await jobs.dead.replay(dead[0]?.id ?? "")
 
 		expect(await charged.promise).toEqual({ cents: 500 })
-		expect(replayed.id).not.toBe(enqueued.id)
+		expect(replayed.id).not.toBe(liveId(enqueued))
 		expect(await jobs.dead.list(chargeCard.queue)).toEqual([])
 
 		await runtime.close()
@@ -223,7 +224,7 @@ describe("dead queue over redis", () => {
 
 		const replayed = await jobs.dead.replay(dead?.id ?? "")
 
-		expect(replayed.id).not.toBe(enqueued.id)
+		expect(replayed.id).not.toBe(liveId(enqueued))
 		expect(await charged.promise).toEqual({ cents: 500 })
 		expect(await jobs.dead.list(chargeCard.queue)).toEqual([])
 

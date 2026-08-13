@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { idempotencyKeyFor } from "@/Idempotency"
 import { createJobs, defineHandler, defineJob, type JobFailureEvent } from "@/index"
 import { memoryDriver } from "@/testing/index"
+import { liveId } from "../support/JobIds"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const renderReport = defineJob({
@@ -62,7 +63,7 @@ describe("a definition that declares a result schema", () => {
 		expect(buried.map(({ entry }) => entry.reason)).toEqual(["unrecoverable"])
 		expect(dead).toHaveLength(1)
 
-		const stored = await jobs.get(enqueued.id)
+		const stored = await jobs.get(liveId(enqueued))
 
 		expect(stored?.state).toBe("failed")
 		expect(stored?.attempts).toBe(1)

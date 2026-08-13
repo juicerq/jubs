@@ -10,6 +10,7 @@ import {
 	type HandlerContext,
 	redisDriver,
 } from "@/index"
+import { liveId } from "../support/JobIds"
 import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -84,7 +85,7 @@ describe("job-core over redis", () => {
 
 		expect(seen.data).toEqual({ to: "ada@example.com", subject: "welcome" })
 		expect(seen.context).toMatchObject({
-			id: enqueued.id,
+			id: liveId(enqueued),
 			attempt: 1,
 			maxAttempts: DELIVERY_DEFAULTS.attempts,
 			origin: "direct",

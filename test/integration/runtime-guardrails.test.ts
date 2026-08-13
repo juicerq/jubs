@@ -10,6 +10,7 @@ import {
 	type JobFailureEvent,
 	redisDriver,
 } from "@/index"
+import { liveId } from "../support/JobIds"
 import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -82,7 +83,7 @@ describe("runtime-guardrails over redis", () => {
 		expect(dead).toHaveLength(1)
 
 		expect(dead[0]?.attempt).toBe(3)
-		expect(dead[0]?.id).toBe(enqueued.id)
+		expect(dead[0]?.id).toBe(liveId(enqueued))
 		expect(dead[0]?.queue).toBe(chargeCard.queue)
 		expect(dead[0]?.name).toBe(chargeCard.name)
 		expect(dead[0]?.origin).toBe("direct")

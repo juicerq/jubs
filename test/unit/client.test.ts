@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { createJobs, DELIVERY_DEFAULTS, defineJob, PayloadError } from "@/index"
+import { liveId } from "../support/JobIds"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const sendEmail = defineJob({
@@ -19,7 +20,7 @@ describe("enqueue", () => {
 			subject: "welcome",
 		})
 
-		expect(enqueued.id).toBe("mail:1")
+		expect(liveId(enqueued)).toBe("mail:1")
 		expect(driver.enqueued).toEqual([
 			{
 				queue: "mail",

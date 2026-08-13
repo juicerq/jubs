@@ -12,6 +12,7 @@ import {
 	type JobSnapshot,
 } from "@/index"
 import { memoryDriver } from "@/testing/index"
+import { liveId } from "../support/JobIds"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -35,7 +36,7 @@ describe("reading a job", () => {
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
 
-		expect(await jobs.get(enqueued.id)).toEqual({
+		expect(await jobs.get(liveId(enqueued))).toEqual({
 			id: "billing:1",
 			queue: "billing",
 			name: "billing.charge",
@@ -62,7 +63,7 @@ describe("reading a job", () => {
 
 		await driver.drain()
 
-		const snapshot = await jobs.get(enqueued.id)
+		const snapshot = await jobs.get(liveId(enqueued))
 
 		expect(snapshot?.state).toBe("completed")
 		expect(snapshot?.attempts).toBe(1)
@@ -79,7 +80,7 @@ describe("reading a job", () => {
 
 		await driver.drain().catch(() => {})
 
-		const snapshot = await jobs.get(enqueued.id)
+		const snapshot = await jobs.get(liveId(enqueued))
 
 		expect(snapshot?.state).toBe("failed")
 		expect(snapshot?.attempts).toBe(1)
@@ -95,7 +96,7 @@ describe("reading a job", () => {
 		})
 
 		const enqueued = await createJobs({ driver }).enqueue(patient, { cents: "500" })
-		const snapshot = await createJobs({ driver }).get(enqueued.id)
+		const snapshot = await createJobs({ driver }).get(liveId(enqueued))
 
 		expect(snapshot?.maxAttempts).toBe(DELIVERY_DEFAULTS.attempts)
 	})
@@ -157,12 +158,13 @@ describe("reading a job", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
 		await driver.runNext()
 
-		expect(seen[0]?.id).toBe(enqueued.id)
+		expect(seen[0]?.id).toBe(id)
 		expect(seen[0]?.state).toBe("active")
-		expect(events[0]?.id).toBe(enqueued.id)
+		expect(events[0]?.id).toBe(id)
 	})
 
 	test("gives back nothing for an id no job answers to", async () => {
@@ -200,16 +202,17 @@ describe("retrying a job", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
 		await driver.drain().catch(() => {})
 
 		refusing = false
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "retried" })
+		expect(await jobs.retry(id)).toEqual({ outcome: "retried" })
 		expect(await driver.drain()).toBe(1)
 		expect(seen).toEqual([500, 500])
 
-		const snapshot = await jobs.get(enqueued.id)
+		const snapshot = await jobs.get(id)
 
 		expect(snapshot?.state).toBe("completed")
 		expect(snapshot?.failure).toBeUndefined()
@@ -222,12 +225,16 @@ describe("retrying a job", () => {
 		await jobs.start([charged])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "not_failed", state: "waiting" })
+		expect(await jobs.retry(id)).toEqual({ outcome: "not_failed", state: "waiting" })
 
 		await driver.drain()
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "not_failed", state: "completed" })
+		expect(await jobs.retry(id)).toEqual({
+			outcome: "not_failed",
+			state: "completed",
+		})
 	})
 
 	test("reports an id no job answers to instead of throwing", async () => {
@@ -269,9 +276,10 @@ describe("cancelling a job", () => {
 		await jobs.start([charged])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "removed" })
-		expect(await jobs.get(enqueued.id)).toBeUndefined()
+		expect(await jobs.cancel(id)).toEqual({ outcome: "removed" })
+		expect(await jobs.get(id)).toBeUndefined()
 		expect(await driver.drain()).toBe(0)
 	})
 
@@ -304,11 +312,12 @@ describe("cancelling a job", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 		const running = driver.runNext().catch((error: unknown) => error)
 
 		await started.promise
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "aborting" })
+		expect(await jobs.cancel(id)).toEqual({ outcome: "aborting" })
 		expect(await running).toBeInstanceOf(CancelledError)
 
 		const [buried] = await jobs.dead.list("billing")
@@ -316,8 +325,8 @@ describe("cancelling a job", () => {
 		expect(buried?.reason).toBe("cancelled")
 		expect(failed).toHaveLength(1)
 		expect(dead).toHaveLength(1)
-		expect(dead[0]?.id).toBe(enqueued.id)
-		expect((await jobs.get(enqueued.id))?.state).toBe("failed")
+		expect(dead[0]?.id).toBe(id)
+		expect((await jobs.get(id))?.state).toBe("failed")
 	})
 
 	test("leaves no mark behind, so a retry of the cancelled job runs to the end", async () => {
@@ -344,18 +353,19 @@ describe("cancelling a job", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 		const running = driver.runNext().catch(() => {})
 
 		await started.promise
-		await jobs.cancel(enqueued.id)
+		await jobs.cancel(id)
 		await running
 
 		cancelling = false
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "retried" })
+		expect(await jobs.retry(id)).toEqual({ outcome: "retried" })
 		expect(await driver.drain()).toBe(1)
 		expect(runs).toEqual([500, 500])
-		expect((await jobs.get(enqueued.id))?.state).toBe("completed")
+		expect((await jobs.get(id))?.state).toBe("completed")
 	})
 
 	test("lets a cancellation nobody collected die with its delivery, never killing the next one", async () => {
@@ -383,11 +393,12 @@ describe("cancelling a job", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 		const running = driver.runNext().catch(() => {})
 
 		await started.promise
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "aborting" })
+		expect(await jobs.cancel(id)).toEqual({ outcome: "aborting" })
 
 		release.resolve()
 
@@ -395,10 +406,10 @@ describe("cancelling a job", () => {
 
 		failing = false
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "retried" })
+		expect(await jobs.retry(id)).toEqual({ outcome: "retried" })
 		expect(await driver.drain()).toBe(1)
 		expect(runs).toEqual([500, 500])
-		expect((await jobs.get(enqueued.id))?.state).toBe("completed")
+		expect((await jobs.get(id))?.state).toBe("completed")
 	})
 
 	test("holds the idempotency lease when the body of a cancelled handler runs past its timeout", async () => {
@@ -433,7 +444,7 @@ describe("cancelling a job", () => {
 
 		await started.promise
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "aborting" })
+		expect(await jobs.cancel(liveId(enqueued))).toEqual({ outcome: "aborting" })
 		expect(await running).toBeInstanceOf(CancelledError)
 
 		const refused = await driver.runNext().catch((error: unknown) => error)
@@ -452,7 +463,10 @@ describe("cancelling a job", () => {
 
 		await driver.drain()
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "finished", state: "completed" })
+		expect(await jobs.cancel(liveId(enqueued))).toEqual({
+			outcome: "finished",
+			state: "completed",
+		})
 	})
 
 	test("reports an id no job answers to instead of throwing", async () => {

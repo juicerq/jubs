@@ -427,6 +427,88 @@ type ForgetResult =
 
 The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result — as the JSON projection of it, the same one Redis gives back — and a failing handler releases the key. Forgetting a key is real here too, because it needs no clock either: a key a delivery holds is refused and stays where it is, and a complete key is deleted. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
 
+## Atomic block
+
+An enqueue lands in Redis the moment you make it. A transaction around it does not hold it back, because Redis knows nothing of your database:
+
+```ts
+await db.transaction(async (tx) => {
+	const order = await createOrder(tx, cart)
+
+	await jobs.enqueue(chargeCard, { orderId: order.id }) // in Redis already
+
+	await reserveStock(tx, cart) // throws
+})
+```
+
+The transaction rolls back and the order is gone. The job is not: a worker takes it, reads an order that no row answers to, and fails — or worse, charges a card for an order nobody placed.
+
+`jobs.atomic(fn)` holds every job enqueued inside `fn` and delivers them, in the order they were enqueued, only once `fn` resolves. An `fn` that throws delivers nothing.
+
+```ts
+await jobs.atomic(async () => {
+	await db.transaction(async (tx) => {
+		const order = await createOrder(tx, cart)
+
+		await jobs.enqueue(chargeCard, { orderId: order.id }) // held
+
+		await reserveStock(tx, cart)
+	})
+})
+```
+
+The block wraps the transaction, not the other way around: it has to outlive the commit, because delivering a job the commit then refuses is the very thing it prevents.
+
+It holds every kind of enqueue — a job on its own and a whole flow — and it holds nothing else.
+
+**Only enqueues are held.** `jobs.dead.discard(id)`, `cancel`, `retry`, `pause` and `resume` act the moment you call them, inside a block or out of it. A `discard` inside a block that then throws has already destroyed the dead record. `jobs.dead.replay(id)` is refused outright inside a block, and says so: a replay forgets the payload's idempotency key, enqueues the job and drops the dead record, and no block makes those three one act.
+
+**A worker started inside a block does not join it.** `jobs.start(handlers)` leaves the block before it consumes, so the jobs its handlers enqueue are delivered at once, however long the worker runs.
+
+**A held enqueue gives back `null`.** `jobs.enqueue` answers with `EnqueuedJob | null`, and it is `null` exactly when a block held the job: there is no job yet, so there is nothing to name. Nothing tells a call site which of the two it is — the block is invisible to the code inside it, which is what lets you wrap code that knows nothing of jubs — so every enqueue reads the same type.
+
+**Every enqueue pays for that, block or no block.** `jobs.get(enqueued.id)` no longer compiles on its own, because `enqueued` may be `null`. Narrow once and pass the narrowed id on.
+
+```ts
+const enqueued = await jobs.enqueue(chargeCard, { orderId })
+
+if (!enqueued) {
+	throw new Error("this enqueue was held by an atomic block")
+}
+
+await jobs.get(enqueued.id)
+```
+
+Inside a block, do not ask for the id at all: ask after the block, or move the enqueue that needs one out of it.
+
+**A block inside a block joins the outer one.** Only the outermost block delivers, and it delivers once. Two blocks running at once hold their own jobs and never see each other's.
+
+**A delay counts from the flush, not from the call.** A job whose delivery declares `delayMs` starts counting when the block delivers it, so a block that runs for `D` puts that job `D + delayMs` away from the moment you enqueued it.
+
+**Two enqueues raced inside one block may swap places.** The order is the order in which each call reaches the buffer, which is after its payload has been validated. Validation is synchronous for an Arktype schema, so calls made in sequence keep their sequence; only enqueues started together, with `Promise.all` over a schema that validates asynchronously, can land in the other order.
+
+### What a block does not cover
+
+**What decides is where the callback was scheduled, not whether it is detached.** A block is an async context, and a timer, a listener or a promise created inside `fn` inherits it. So a `setImmediate` scheduled from inside the block is still inside the block when it runs — and it runs after `fn` resolved, which is after the block already delivered what it held.
+
+An enqueue that arrives then is **refused**, because it can no longer be held and delivering it would break the promise the block makes:
+
+```ts
+await jobs.atomic(async () => {
+	setImmediate(async () => {
+		await jobs.enqueue(chargeCard, { orderId }) // throws: the block has ended
+	})
+})
+```
+
+The same holds for a promise `fn` starts and never awaits. Await the work inside `fn`, and the block holds its jobs; or enqueue outside the block, and it is delivered at once. A callback registered **outside** the block, even one an event inside the block triggers, never sees the block at all: its enqueue lands in Redis immediately.
+
+**The delivery of a block is not atomic.** The held jobs are delivered one by one. A driver that fails on the third leaves the first two in Redis, and everything after the third is abandoned without being tried. `atomic` rejects with an error naming both counts, carrying the driver's own failure as its `cause`. Rolling the first two back is not on offer: a job already taken by a worker cannot be unenqueued — so running the block again re-delivers the ones that did land.
+
+**The jobs are held in memory.** A process that dies inside a block loses every job it held, and nothing records that they existed. This is the gap an outbox closes, by writing the envelopes inside your own transaction. `jobs.atomic(fn, { tx })` is where that will be asked for; it throws today, because no outbox is configured on the client.
+
+Use a block for what a rollback would otherwise contradict. For a job that must survive a crash between the commit and the delivery, wait for the outbox.
+
 ## Scheduling
 
 A schedule is the recurrence rule that makes a job run on its own, without a producer. It sits on the definition, beside the payload schema and the delivery policy, so the recurrence is declared where the job is declared — not in a crontab, not in a wiring file some other team owns.
@@ -905,10 +987,16 @@ Three places hand you one: `jobs.enqueue` returns it, `jobs.dead.list(queue)` re
 ```ts
 const enqueued = await jobs.enqueue(sendWelcomeEmail, { userId: "u_1", locale: "pt" })
 
+if (!enqueued) {
+	return
+}
+
 const snapshot = await jobs.get(enqueued.id)
 ```
 
 The id is opaque. Read it and pass it back; do not build one.
+
+`jobs.enqueue` gives back `EnqueuedJob | null`, and it is `null` only when an [atomic block](#atomic-block) held the job instead of delivering it. That is not only the code written inside the block: a callback scheduled from inside it inherits the block, so what it enqueues is held too — and refused outright once the block has ended. Narrow, and the id you pass on is the real one.
 
 **A dead job id names the dead queue.** `jobs.dead.list("billing")` gives ids like `billing.dead:12`, because the copy is kept on `billing.dead`. That id serves `dead.replay` and `dead.discard`, and nothing else. `get`, `retry` and `cancel` speak of the live queues only, so a dead id is an absence to them: `get` gives back `undefined` and the other two `unknown_job`. A dead job is not a job — it is the record of one, it runs nothing, and letting `cancel` reach it would destroy the very copy you keep to replay.
 

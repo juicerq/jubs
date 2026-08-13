@@ -1,4 +1,5 @@
 import type { StandardSchemaV1 } from "@standard-schema/spec"
+import { holdOrDeliver, inAtomicBlock, outsideAtomicBlock, runAtomicBlock } from "@/Atomic"
 import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
 import {
 	type AwaitsMap,
@@ -41,7 +42,8 @@ export interface JobsConfig {
 
 export interface JobsClient {
 	/**
-	 * Enqueues one job, and gives back the id it answers to.
+	 * Enqueues one job, and gives back the id it answers to — or `null` when an
+	 * atomic block holds the enqueue back, because no job exists yet to be named.
 	 *
 	 * A definition that declares `awaits` takes a third argument: what fills every
 	 * one of its slots, nesting to any depth and across queues. The whole tree is
@@ -65,7 +67,32 @@ export interface JobsClient {
 		definition: JobDefinition<Payload, Queue, Result, Awaits>,
 		data: StandardSchemaV1.InferInput<Payload>,
 		...awaits: EnqueueAwaits<Awaits>
-	): Promise<EnqueuedJob>
+	): Promise<EnqueuedJob | null>
+	/**
+	 * Runs a block that holds every job it enqueues, and delivers them, in the
+	 * order they were enqueued, only once the block resolves. A block that throws
+	 * delivers nothing, and an enqueue a block holds gives back `null`, because no
+	 * job exists yet.
+	 *
+	 * A block opened inside another block joins the outer one, so the outermost
+	 * block is the only one that delivers. Two blocks running at once never see
+	 * each other's held jobs.
+	 *
+	 * What the block holds is every enqueue, and only those: `dead.discard`,
+	 * `cancel`, `retry`, `pause` and `resume` act at once, and `dead.replay` is
+	 * refused. The jobs are held in memory, so a process that dies mid-block loses
+	 * them, and an enqueue made after the block has ended — from a callback it
+	 * scheduled and never waited for — is refused rather than lost. A runtime
+	 * `start` opens inside a block leaves the block first, so what its handlers
+	 * enqueue is never held.
+	 *
+	 * A delivery that fails mid-flush leaves the jobs before it enqueued and
+	 * abandons the ones after it: the failure names both counts.
+	 *
+	 * `options.tx` **throws synchronously**, before the block runs, for as long as
+	 * no outbox is configured on this client.
+	 */
+	atomic<Result>(run: () => Promise<Result>, options?: { readonly tx?: unknown }): Promise<Result>
 	start<Queue extends string>(
 		handlers: JobHandler<Queue>[],
 		options?: StartOptions<Queue>,
@@ -110,7 +137,8 @@ export interface JobsClient {
 		list(queue: string): Promise<DeadJob[]>
 		/**
 		 * Enqueues a dead job again from the envelope it was buried with, and drops
-		 * the dead record.
+		 * the dead record. Called inside an atomic block it throws: the replay is
+		 * three effects that no block makes one.
 		 *
 		 * The idempotency key that payload names is forgotten first, so the replay
 		 * runs the handler instead of replaying a result kept from an earlier run. A
@@ -208,6 +236,25 @@ async function forgetKey(
 	return driver.idempotency.forget(key)
 }
 
+/**
+ * Stores one job and names it after the queue it went to, or gives back `null`
+ * when an atomic block held the store back. The id a driver answers with is the
+ * stored one, and the id this library speaks is the queue and that one together,
+ * so the two always travel as a pair.
+ */
+async function heldOrNamed(
+	queue: string,
+	store: () => Promise<EnqueuedJob>,
+): Promise<EnqueuedJob | null> {
+	const stored = await holdOrDeliver(store)
+
+	if (!stored) {
+		return null
+	}
+
+	return { id: composeJobId(queue, stored.id) }
+}
+
 function assertEveryDeadQueueIsUsed(config: JobsConfig): void {
 	if (!config.definitions) {
 		return
@@ -246,6 +293,12 @@ export function createJobs(config: JobsConfig): JobsClient {
 			},
 
 			async replay(id) {
+				if (inAtomicBlock()) {
+					throw new Error(
+						`jubs: jobs.dead.replay("${id}") was called inside an atomic block, and a replay is not one enqueue — it forgets the payload's idempotency key, enqueues the job and drops the dead record, and those three never become one act. Holding only the last two would let a block that then failed leave the key forgotten with nothing enqueued, and the record listed for a second replay of the same job. Replay outside the block.`,
+					)
+				}
+
 				const { queue, storedId } = readDeadJobId(id)
 				const entry = await config.driver.dead.read(queue, storedId)
 
@@ -320,24 +373,38 @@ export function createJobs(config: JobsConfig): JobsClient {
 		async enqueue(definition, data, ...awaits) {
 			if (slotsOf(definition).length > 0) {
 				const root = await composeFlow(definition, data, awaits[0])
-				const flowed = await config.driver.flow.enqueue(root)
 
-				return { id: composeJobId(definition.queue, flowed.id) }
+				return heldOrNamed(definition.queue, () => config.driver.flow.enqueue(root))
 			}
 
 			const validated = await validatePayload(definition, data)
 
-			const enqueued = await config.driver.enqueue({
-				queue: definition.queue,
-				envelope: { v: payloadVersion(definition), name: definition.name, data, origin: "direct" },
-				delivery: resolveDelivery(definition, validated),
-			})
+			return heldOrNamed(definition.queue, () =>
+				config.driver.enqueue({
+					queue: definition.queue,
+					envelope: {
+						v: payloadVersion(definition),
+						name: definition.name,
+						data,
+						origin: "direct",
+					},
+					delivery: resolveDelivery(definition, validated),
+				}),
+			)
+		},
 
-			return { id: composeJobId(definition.queue, enqueued.id) }
+		atomic(run, options) {
+			if (options?.tx !== undefined) {
+				throw new Error(
+					"jubs: jobs.atomic was given a tx, and this client has no outbox configured — a tx exists to write the envelopes inside your own database transaction, and nothing here can accept one. Call jobs.atomic(fn) without it: the block still holds every enqueue until it resolves, but it holds them in memory, so a process that dies mid-block loses them.",
+				)
+			}
+
+			return runAtomicBlock(run)
 		},
 
 		start(handlers, options) {
-			return startRuntime(config, handlers, options)
+			return outsideAtomicBlock(() => startRuntime(config, handlers, options))
 		},
 
 		async get(id) {

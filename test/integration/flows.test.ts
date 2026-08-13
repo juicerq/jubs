@@ -6,6 +6,7 @@ import { deadQueueName } from "@/Dead"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { composeJobId } from "@/JobId"
 import { CANCEL_KEY_PREFIX, IDEMPOTENCY_KEY_PREFIX } from "@/RedisDriver"
+import { liveId } from "../support/JobIds"
 import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -509,7 +510,7 @@ describe("a child that fails every attempt over redis", () => {
 
 		expect(sent).toBe(0)
 		expect(await parent.getState()).toBe("failed")
-		expect(parentEntry?.jobId).toBe(enqueued.id)
+		expect(parentEntry?.jobId).toBe(liveId(enqueued))
 		expect(parentEntry?.reason).toBe("child_dead")
 		expect(parentEntry?.error.message).toContain(`"charge", which runs "${chargeCard.name}"`)
 		expect(parentEntry?.children).toEqual([
@@ -815,14 +816,15 @@ describe("cancelling a flow over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(closeTop, { id: "hold-1" }, { hold: { id: "hold-1" } })
+		const id = liveId(enqueued)
 
 		const signal = await running.promise
-		const reached = await jobs.cancel(enqueued.id)
+		const reached = await jobs.cancel(id)
 		const marks = await inspectorConnection.keys(`${CANCEL_KEY_PREFIX}{${flowQueue}}:*`)
 
 		expect(reached).toEqual({ outcome: "children_running" })
 		expect(signal.aborted).toBe(false)
-		expect((await jobs.get(enqueued.id))?.state).toBe("waiting_children")
+		expect((await jobs.get(id))?.state).toBe("waiting_children")
 		expect(marks).toEqual([])
 
 		release.resolve()
@@ -856,9 +858,10 @@ describe("cancelling a flow over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 
 		const enqueued = await jobs.enqueue(closeTop, { id: "idle-1" }, { hold: { id: "idle-1" } })
+		const id = liveId(enqueued)
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "removed" })
-		expect(await jobs.get(enqueued.id)).toBeUndefined()
+		expect(await jobs.cancel(id)).toEqual({ outcome: "removed" })
+		expect(await jobs.get(id)).toBeUndefined()
 		expect(await live.getJobCounts()).toMatchObject(EMPTY_COUNTS)
 	}, 30_000)
 
@@ -919,7 +922,7 @@ describe("cancelling a flow over redis", () => {
 
 		const hog = await jobs.enqueue(holdWorker, { id: "hog-1" })
 
-		await waitFor(async () => (await jobs.get(hog.id))?.state === "active")
+		await waitFor(async () => (await jobs.get(liveId(hog)))?.state === "active")
 
 		const enqueued = await jobs.enqueue(
 			closeTop,

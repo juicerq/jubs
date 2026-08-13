@@ -15,6 +15,7 @@ import {
 	redisDriver,
 } from "@/index"
 import { CANCEL_KEY_PREFIX } from "@/RedisDriver"
+import { liveId } from "../support/JobIds"
 import { scoped, storedId } from "./namespace"
 
 const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
@@ -151,9 +152,10 @@ describe("reading a job over redis", () => {
 
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
-		expect(await jobs.get(enqueued.id)).toEqual({
-			id: enqueued.id,
+		expect(await jobs.get(id)).toEqual({
+			id: id,
 			queue: chargeCard.queue,
 			name: chargeCard.name,
 			state: "waiting",
@@ -190,7 +192,7 @@ describe("reading a job over redis", () => {
 
 		await waitFor(async () => (await queue.getJob(storedId(enqueued)))?.finishedOn !== undefined)
 
-		const snapshot = await jobs.get(enqueued.id)
+		const snapshot = await jobs.get(liveId(enqueued))
 
 		expect(snapshot?.state).toBe("failed")
 		expect(snapshot?.attempts).toBe(2)
@@ -230,7 +232,7 @@ describe("reading a job over redis", () => {
 
 		const survivor = await jobs.enqueue(chargeCard, { cents: "100" })
 
-		await waitFor(async () => (await jobs.get(survivor.id))?.state === "completed")
+		await waitFor(async () => (await jobs.get(liveId(survivor)))?.state === "completed")
 
 		refusing = true
 
@@ -312,16 +314,17 @@ describe("retrying a job over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
 		await waitFor(async () => (await queue.getJob(storedId(enqueued)))?.finishedOn !== undefined)
 
 		refusing = false
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "retried" })
+		expect(await jobs.retry(id)).toEqual({ outcome: "retried" })
 
-		await waitFor(async () => (await jobs.get(enqueued.id))?.state === "completed")
+		await waitFor(async () => (await jobs.get(id))?.state === "completed")
 
-		const snapshot = await jobs.get(enqueued.id)
+		const snapshot = await jobs.get(id)
 
 		expect(attempts).toEqual([1, 1])
 		expect(snapshot?.attempts).toBe(1)
@@ -342,7 +345,7 @@ describe("retrying a job over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "not_failed", state: "waiting" })
+		expect(await jobs.retry(liveId(enqueued))).toEqual({ outcome: "not_failed", state: "waiting" })
 		expect(await jobs.retry(`${chargeCard.queue}:404`)).toEqual({ outcome: "unknown_job" })
 	})
 })
@@ -358,9 +361,10 @@ describe("cancelling a job over redis", () => {
 		const queue = await scrub(inspect(chargeCard.queue))
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "removed" })
-		expect(await jobs.get(enqueued.id)).toBeUndefined()
+		expect(await jobs.cancel(id)).toEqual({ outcome: "removed" })
+		expect(await jobs.get(id)).toBeUndefined()
 		expect(await queue.getJobCountByTypes("waiting")).toBe(0)
 	})
 
@@ -376,10 +380,14 @@ describe("cancelling a job over redis", () => {
 		const jobs = createJobs({ driver: redisDriver(workerConnection) })
 		const runtime = await jobs.start([defineHandler(chargeCard, async () => {})])
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
-		await waitFor(async () => (await jobs.get(enqueued.id))?.state === "completed")
+		await waitFor(async () => (await jobs.get(id))?.state === "completed")
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "finished", state: "completed" })
+		expect(await jobs.cancel(id)).toEqual({
+			outcome: "finished",
+			state: "completed",
+		})
 		expect(await jobs.cancel(`${chargeCard.queue}:404`)).toEqual({ outcome: "unknown_job" })
 
 		await runtime.close()
@@ -420,10 +428,11 @@ describe("cancelling a job over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
 		await started.promise
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "aborting" })
+		expect(await jobs.cancel(id)).toEqual({ outcome: "aborting" })
 
 		await waitFor(async () => (await jobs.dead.list(chargeCard.queue)).length === 1)
 
@@ -431,8 +440,8 @@ describe("cancelling a job over redis", () => {
 
 		expect(buried?.reason).toBe("cancelled")
 		expect(buried?.error.name).toBe("CancelledError")
-		expect(dead[0]?.id).toBe(enqueued.id)
-		expect((await jobs.get(enqueued.id))?.state).toBe("failed")
+		expect(dead[0]?.id).toBe(id)
+		expect((await jobs.get(id))?.state).toBe("failed")
 		expect(runs).toBe(1)
 
 		await runtime.close()
@@ -470,16 +479,17 @@ describe("cancelling a job over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
 		await started.promise
-		await jobs.cancel(enqueued.id)
-		await waitFor(async () => (await jobs.get(enqueued.id))?.state === "failed")
+		await jobs.cancel(id)
+		await waitFor(async () => (await jobs.get(id))?.state === "failed")
 
 		cancelling = false
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "retried" })
+		expect(await jobs.retry(id)).toEqual({ outcome: "retried" })
 
-		await waitFor(async () => (await jobs.get(enqueued.id))?.state === "completed")
+		await waitFor(async () => (await jobs.get(id))?.state === "completed")
 
 		expect(runs).toEqual([500, 500])
 
@@ -519,19 +529,20 @@ describe("cancelling a job over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+		const id = liveId(enqueued)
 
 		await started.promise
 
-		expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "aborting" })
+		expect(await jobs.cancel(id)).toEqual({ outcome: "aborting" })
 
 		release.resolve()
 
-		await waitFor(async () => (await jobs.get(enqueued.id))?.state === "failed")
+		await waitFor(async () => (await jobs.get(id))?.state === "failed")
 
 		failing = false
 
-		expect(await jobs.retry(enqueued.id)).toEqual({ outcome: "retried" })
-		await waitFor(async () => (await jobs.get(enqueued.id))?.state === "completed")
+		expect(await jobs.retry(id)).toEqual({ outcome: "retried" })
+		await waitFor(async () => (await jobs.get(id))?.state === "completed")
 
 		expect(runs).toEqual([500, 500])
 
@@ -562,7 +573,7 @@ describe("cancelling a job over redis", () => {
 		try {
 			await waitFor(async () => (await counter(startedKey)) === 1)
 
-			expect(await jobs.cancel(enqueued.id)).toEqual({ outcome: "aborting" })
+			expect(await jobs.cancel(liveId(enqueued))).toEqual({ outcome: "aborting" })
 
 			await waitFor(async () => (await counter(abortedKey)) === 1)
 			await waitFor(async () => (await jobs.dead.list(renderReport.queue)).length === 1)
@@ -608,7 +619,7 @@ describe("pausing a queue over redis", () => {
 		await Bun.sleep(500)
 
 		expect(charged).toEqual([])
-		expect((await jobs.get(enqueued.id))?.state).toBe("waiting")
+		expect((await jobs.get(liveId(enqueued)))?.state).toBe("waiting")
 
 		await jobs.resume(chargeCard.queue)
 

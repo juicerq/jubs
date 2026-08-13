@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
 import { createJobs, defineHandler, defineJob } from "@/index"
 import { type MemoryDriver, memoryDriver } from "@/testing/index"
+import { liveId } from "../support/JobIds"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -49,7 +50,7 @@ describe("burying a dead job", () => {
 
 		const buried = await jobs.dead.list("billing")
 
-		expect(buried[0]?.jobId).toBe(enqueued.id)
+		expect(buried[0]?.jobId).toBe(liveId(enqueued))
 		expect(buried[0]?.id).toBe("billing.dead:1")
 	})
 

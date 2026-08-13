@@ -14,6 +14,7 @@ import {
 } from "@/index"
 import { composeChildId, readChildSlot } from "@/JobId"
 import { type MemoryDriver, memoryDriver } from "@/testing/index"
+import { liveId } from "../support/JobIds"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const fetchXmls = defineJob({
@@ -75,7 +76,7 @@ describe("enqueuing a definition that waits on children", () => {
 			},
 		)
 
-		expect(enqueued.id).toBe("nfe:1")
+		expect(liveId(enqueued)).toBe("nfe:1")
 		expect(driver.flows).toEqual([
 			{
 				queue: "nfe",
@@ -225,7 +226,7 @@ describe("enqueuing a definition that waits on children", () => {
 
 		const enqueued = await jobs.enqueue(plain, { run_id: "r-1" })
 
-		expect(enqueued.id).toBe("nfe:1")
+		expect(liveId(enqueued)).toBe("nfe:1")
 		expect(driver.flows).toEqual([])
 		expect(driver.enqueued).toEqual([
 			{
