@@ -476,14 +476,18 @@ describe("a child that fails every attempt over redis", () => {
 
 		const buried = await jobs.dead.list(flowQueue)
 		const parentEntry = buried.find((entry) => entry.envelope.name === sendInvoice.name)
-		const childId = failedChildId(parentEntry?.error.message)
+
+		if (parentEntry?.reason !== "child_dead") {
+			throw new Error(`the parent was buried for ${parentEntry?.reason}, not over its children`)
+		}
+
+		const childId = failedChildId(parentEntry.error.message)
 
 		expect(sent).toBe(0)
 		expect(await parent.getState()).toBe("failed")
-		expect(parentEntry?.jobId).toBe(liveId(enqueued))
-		expect(parentEntry?.reason).toBe("child_dead")
-		expect(parentEntry?.error.message).toContain(`"charge", which runs "${chargeCard.name}"`)
-		expect(parentEntry?.children).toEqual([
+		expect(parentEntry.jobId).toBe(liveId(enqueued))
+		expect(parentEntry.error.message).toContain(`"charge", which runs "${chargeCard.name}"`)
+		expect(parentEntry.children).toEqual([
 			{ slot: "render", value: { url: "https://a.example/inv-1.pdf" } },
 		])
 		expect(childId).toStartWith(`${flowQueue}:charge~`)

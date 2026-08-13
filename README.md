@@ -938,12 +938,15 @@ export const nightlyReportHandler = defineHandler(nightlyReport, async (data) =>
 
 **A child that fails every attempt buries its parent.** The child does not fail the parent inside Redis — it drops out of the parent's dependencies, the parent runs, finds the failure and is buried with the reason `child_dead` before its handler is ever called. The dead entry keeps `children`: what the children that **did** finish returned, as the raw JSON Redis holds. So a replay is an informed decision rather than a guess. It propagates: a burial for `child_dead` buries the grandparent the same way.
 
+`children` is on the `child_dead` entry alone — a burial for any other reason cannot be written holding them — so narrow on `reason` before you read them.
+
 ```ts
 const [dead] = await jobs.dead.list("reports")
 
-console.log(dead.reason) // "child_dead"
-console.log(dead.error.message) // names each failed child: its slot, its definition, its id
-console.log(dead.children) // what the others returned
+if (dead?.reason === "child_dead") {
+	console.log(dead.error.message) // names each failed child: its slot, its definition, its id
+	console.log(dead.children) // what the others returned
+}
 ```
 
 The message names the slot **and** the definition that slot declares, because the slot alone does not say what ran and the definition alone does not say which of two slots it was.

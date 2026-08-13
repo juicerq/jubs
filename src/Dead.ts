@@ -1,8 +1,8 @@
 import { UnrecoverableError } from "bullmq"
 import { CancelledError } from "@/Cancellation"
 import type { ChildResult, JobDelivery } from "@/Driver"
-import type { Envelope } from "@/Envelope"
-import type { SerializedError } from "@/Failure"
+import { type Envelope, readEnvelope } from "@/Envelope"
+import type { ErrorSnapshot, SerializedError } from "@/Failure"
 import { ChildDeadError, ChildrenShortError } from "@/Flow"
 import { VersionAheadError } from "@/Migration"
 
@@ -25,7 +25,35 @@ export type DeadReason =
 	| "child_dead"
 	| "children_short"
 
-export interface DeadEntry {
+const DEAD_REASONS: readonly DeadReason[] = [
+	"attempts_exhausted",
+	"unrecoverable",
+	"version_ahead",
+	"cancelled",
+	"child_dead",
+	"children_short",
+]
+
+/**
+ * Why a job was buried, and what that reason carries with it.
+ *
+ * The children travel inside the `child_dead` arm rather than beside it, so a
+ * burial for any other reason cannot be written holding them, and a
+ * `child_dead` burial cannot be written without them.
+ */
+export type Burial =
+	| {
+			readonly reason: "child_dead"
+			/**
+			 * What the children of this job returned, so replaying it is an informed
+			 * decision rather than a guess. The values are the raw JSON projection
+			 * Redis holds, put through no `result` schema.
+			 */
+			readonly children: readonly ChildResult[]
+	  }
+	| { readonly reason: Exclude<DeadReason, "child_dead"> }
+
+export type DeadEntry = {
 	/**
 	 * The id the job answered to while it was alive — the very string `enqueue`
 	 * gave the producer, and the one `jobs.get` and `jobs.retry` take.
@@ -38,18 +66,136 @@ export interface DeadEntry {
 	readonly jobId: string
 	readonly envelope: Envelope
 	readonly error: SerializedError
-	readonly reason: DeadReason
-	/**
-	 * What the children of this job returned, kept only for a `child_dead`
-	 * burial, so replaying it is an informed decision rather than a guess. The
-	 * values are the raw JSON projection Redis holds, put through no `result`
-	 * schema.
-	 */
-	readonly children?: readonly ChildResult[]
+} & Burial
+
+export type DeadJob = DeadEntry & {
+	readonly id: string
 }
 
-export interface DeadJob extends DeadEntry {
-	readonly id: string
+export class DeadRecordError extends Error {
+	constructor(reason: string) {
+		super(
+			`jubs: the stored dead record is not a jubs burial — ${reason}. Nothing can replay a record of this shape; drop it with jobs.dead.discard(id).`,
+		)
+		this.name = "DeadRecordError"
+	}
+}
+
+function isDeadReason(value: unknown): value is DeadReason {
+	return DEAD_REASONS.includes(value as DeadReason)
+}
+
+function readSnapshot(stored: unknown, field: string): ErrorSnapshot {
+	if (typeof stored !== "object" || stored === null) {
+		throw new DeadRecordError(
+			`its ${field} is ${JSON.stringify(stored)}, which is not a serialized error`,
+		)
+	}
+
+	const snapshot = stored as Partial<SerializedError>
+
+	if (typeof snapshot.name !== "string") {
+		throw new DeadRecordError(`its ${field} carries no error name`)
+	}
+
+	if (typeof snapshot.message !== "string") {
+		throw new DeadRecordError(`its ${field} carries no error message`)
+	}
+
+	if (snapshot.stack !== undefined && typeof snapshot.stack !== "string") {
+		throw new DeadRecordError(`its ${field} carries a stack that is not text`)
+	}
+
+	const read: ErrorSnapshot = { name: snapshot.name, message: snapshot.message }
+
+	if (snapshot.stack === undefined) {
+		return read
+	}
+
+	return { ...read, stack: snapshot.stack }
+}
+
+function readError(stored: unknown): SerializedError {
+	const read = readSnapshot(stored, "error")
+	const cause = (stored as Partial<SerializedError>).cause
+
+	if (cause === undefined) {
+		return read
+	}
+
+	return { ...read, cause: readSnapshot(cause, "error cause") }
+}
+
+function readChildren(stored: unknown): readonly ChildResult[] {
+	if (!Array.isArray(stored)) {
+		throw new DeadRecordError(
+			`it was buried for "child_dead" and its children are ${JSON.stringify(stored)}, which is not a list of what the children returned`,
+		)
+	}
+
+	const stray = stored.findIndex(
+		(child: unknown) =>
+			typeof child !== "object" ||
+			child === null ||
+			typeof (child as Partial<ChildResult>).slot !== "string",
+	)
+
+	if (stray >= 0) {
+		throw new DeadRecordError(`its child ${JSON.stringify(stored[stray])} names no slot it filled`)
+	}
+
+	return stored as readonly ChildResult[]
+}
+
+/**
+ * Reads a dead record back out of the queue that keeps it, refusing anything
+ * that is not a burial this library wrote.
+ *
+ * A record is read once, here, and past this point its shape is the truth
+ * `jobs.dead.replay` and `jobs.dead.discard` act on. Refusing is the only sound
+ * answer: a record the queue holds but nothing can read names no job to put
+ * back, and replaying it would enqueue a payload no definition validated.
+ */
+export function readDeadEntry(stored: unknown): DeadEntry {
+	if (typeof stored !== "object" || stored === null) {
+		throw new DeadRecordError(`expected an object, got ${typeof stored}`)
+	}
+
+	const entry = stored as {
+		jobId?: unknown
+		envelope?: unknown
+		error?: unknown
+		reason?: unknown
+		children?: unknown
+	}
+
+	if (typeof entry.jobId !== "string" || entry.jobId.length === 0) {
+		throw new DeadRecordError("its job id is missing, so it names no job to put back")
+	}
+
+	if (!isDeadReason(entry.reason)) {
+		throw new DeadRecordError(
+			`its reason ${JSON.stringify(entry.reason)} is not one a job is buried for`,
+		)
+	}
+
+	const buried = {
+		jobId: entry.jobId,
+		envelope: readEnvelope(entry.envelope),
+		error: readError(entry.error),
+	}
+
+	if (entry.reason === "child_dead") {
+		return { ...buried, reason: entry.reason, children: readChildren(entry.children) }
+	}
+
+	if (entry.children !== undefined) {
+		throw new DeadRecordError(
+			`it was buried for "${entry.reason}" and still carries children, which only a child_dead burial holds`,
+		)
+	}
+
+	return { ...buried, reason: entry.reason }
 }
 
 const DEAD_SUFFIX = ".dead"
@@ -83,7 +229,7 @@ function raised(error: unknown): unknown {
 	return error
 }
 
-export function childDead(error: unknown): ChildDeadError | undefined {
+function childDead(error: unknown): ChildDeadError | undefined {
 	const cause = raised(error)
 
 	if (cause instanceof ChildDeadError) {
@@ -93,29 +239,38 @@ export function childDead(error: unknown): ChildDeadError | undefined {
 	return undefined
 }
 
-export function deadReason(delivery: JobDelivery, error: unknown): DeadReason | undefined {
+/**
+ * Whether this failure buries the job, and for what.
+ *
+ * It gives back the whole burial rather than the reason alone, so the children
+ * a `child_dead` burial keeps are read in the same step that decides it, and no
+ * caller classifies the error a second time to graft them on.
+ */
+export function burialFor(delivery: JobDelivery, error: unknown): Burial | undefined {
 	if (error instanceof CancelledError) {
-		return "cancelled"
+		return { reason: "cancelled" }
 	}
 
 	if (error instanceof VersionAheadError) {
-		return "version_ahead"
+		return { reason: "version_ahead" }
 	}
 
-	if (childDead(error)) {
-		return "child_dead"
+	const dead = childDead(error)
+
+	if (dead) {
+		return { reason: "child_dead", children: dead.results }
 	}
 
 	if (raised(error) instanceof ChildrenShortError) {
-		return "children_short"
+		return { reason: "children_short" }
 	}
 
 	if (error instanceof UnrecoverableError) {
-		return "unrecoverable"
+		return { reason: "unrecoverable" }
 	}
 
 	if (delivery.attempt >= delivery.maxAttempts) {
-		return "attempts_exhausted"
+		return { reason: "attempts_exhausted" }
 	}
 
 	return undefined

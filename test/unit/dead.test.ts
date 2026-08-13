@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { UnrecoverableError } from "bullmq"
-import { childDead, deadReason } from "@/Dead"
+import { burialFor, readDeadEntry } from "@/Dead"
 import { ChildDeadError, ChildrenShortError } from "@/Flow"
 import {
 	CancelledError,
@@ -444,50 +444,158 @@ function unrecoverable(error: Error): UnrecoverableError {
 	return failure
 }
 
-describe("deadReason", () => {
+describe("burialFor", () => {
 	test("reads a cancelled delivery as cancelled", () => {
-		expect(deadReason(midway, new CancelledError("billing.charge"))).toBe("cancelled")
+		expect(burialFor(midway, new CancelledError("billing.charge"))).toEqual({ reason: "cancelled" })
 	})
 
 	test("reads a payload a newer deploy wrote as version_ahead", () => {
-		expect(deadReason(midway, new VersionAheadError("billing.charge", 2, 1))).toBe("version_ahead")
+		expect(burialFor(midway, new VersionAheadError("billing.charge", 2, 1))).toEqual({
+			reason: "version_ahead",
+		})
 	})
 
 	test("reads a child that failed every attempt as child_dead, raw and wrapped", () => {
-		expect(deadReason(midway, childIsDead)).toBe("child_dead")
-		expect(deadReason(midway, unrecoverable(childIsDead))).toBe("child_dead")
+		const burial = { reason: "child_dead", children: [ledgerResult] } as const
+
+		expect(burialFor(midway, childIsDead)).toEqual(burial)
+		expect(burialFor(midway, unrecoverable(childIsDead))).toEqual(burial)
 	})
 
 	test("reads a slot holding fewer children as children_short, raw and wrapped", () => {
 		const short = new ChildrenShortError("a slot holds fewer children")
 
-		expect(deadReason(midway, short)).toBe("children_short")
-		expect(deadReason(midway, unrecoverable(short))).toBe("children_short")
+		expect(burialFor(midway, short)).toEqual({ reason: "children_short" })
+		expect(burialFor(midway, unrecoverable(short))).toEqual({ reason: "children_short" })
 	})
 
 	test("reads a handler that gave up as unrecoverable", () => {
-		expect(deadReason(midway, new UnrecoverableError("the card is closed"))).toBe("unrecoverable")
+		expect(burialFor(midway, new UnrecoverableError("the card is closed"))).toEqual({
+			reason: "unrecoverable",
+		})
 	})
 
 	test("reads the last attempt of an ordinary failure as attempts_exhausted", () => {
-		expect(deadReason(lastAttempt, new Error("the card was declined"))).toBe("attempts_exhausted")
+		expect(burialFor(lastAttempt, new Error("the card was declined"))).toEqual({
+			reason: "attempts_exhausted",
+		})
 	})
 
 	test("reads an ordinary failure with attempts left as no burial at all", () => {
-		expect(deadReason(midway, new Error("the card was declined"))).toBeUndefined()
+		expect(burialFor(midway, new Error("the card was declined"))).toBeUndefined()
+	})
+
+	test("keeps no children on a burial no child caused, raw and wrapped", () => {
+		const declined = new Error("the card was declined")
+
+		expect(burialFor(lastAttempt, declined)).not.toHaveProperty("children")
+		expect(burialFor(lastAttempt, unrecoverable(declined))).not.toHaveProperty("children")
 	})
 })
 
-describe("childDead", () => {
-	test("reads back the error a burial keeps the children of, raw and wrapped", () => {
-		expect(childDead(childIsDead)?.results).toEqual([ledgerResult])
-		expect(childDead(unrecoverable(childIsDead))).toBe(childIsDead)
+const storedEntry = {
+	jobId: "billing:1",
+	envelope: { v: 1, name: "billing.charge", data: { cents: "500" }, origin: "direct" },
+	error: { name: "Error", message: "the card was declined" },
+	reason: "attempts_exhausted",
+}
+
+function refusal(stored: unknown): string {
+	try {
+		readDeadEntry(stored)
+	} catch (error: unknown) {
+		return (error as Error).message
+	}
+
+	throw new Error(`readDeadEntry read ${JSON.stringify(stored)} instead of refusing it`)
+}
+
+describe("readDeadEntry", () => {
+	test("reads back a record this library wrote, whole", () => {
+		expect(readDeadEntry(structuredClone(storedEntry))).toEqual({
+			jobId: "billing:1",
+			envelope: { v: 1, name: "billing.charge", data: { cents: "500" }, origin: "direct" },
+			error: { name: "Error", message: "the card was declined" },
+			reason: "attempts_exhausted",
+		})
 	})
 
-	test("reads nothing out of an error no child raised", () => {
-		const declined = new Error("the card was declined")
+	test("reads back the children of a child_dead record, whole", () => {
+		const stored = { ...storedEntry, reason: "child_dead", children: [ledgerResult] }
 
-		expect(childDead(declined)).toBeUndefined()
-		expect(childDead(unrecoverable(declined))).toBeUndefined()
+		expect(readDeadEntry(stored)).toEqual({
+			jobId: "billing:1",
+			envelope: { v: 1, name: "billing.charge", data: { cents: "500" }, origin: "direct" },
+			error: { name: "Error", message: "the card was declined" },
+			reason: "child_dead",
+			children: [ledgerResult],
+		})
+	})
+
+	test("refuses what is not an object at all", () => {
+		expect(refusal("billing:1")).toContain("expected an object, got string")
+		expect(refusal(null)).toContain("expected an object, got object")
+	})
+
+	test("refuses a record naming no job id", () => {
+		expect(refusal({ ...storedEntry, jobId: undefined })).toContain("its job id is missing")
+		expect(refusal({ ...storedEntry, jobId: 7 })).toContain("its job id is missing")
+		expect(refusal({ ...storedEntry, jobId: "" })).toContain("its job id is missing")
+	})
+
+	test("refuses a reason no job is buried for", () => {
+		expect(refusal({ ...storedEntry, reason: "expired" })).toContain(
+			'its reason "expired" is not one a job is buried for',
+		)
+		expect(refusal({ ...storedEntry, reason: undefined })).toContain("its reason undefined")
+	})
+
+	test("refuses an envelope that is not one, in the envelope's own words", () => {
+		expect(refusal({ ...storedEntry, envelope: { name: "billing.charge" } })).toContain(
+			"its payload version `v` is missing",
+		)
+	})
+
+	test("refuses an error that is not a serialized one", () => {
+		expect(refusal({ ...storedEntry, error: "the card was declined" })).toContain(
+			'its error is "the card was declined", which is not a serialized error',
+		)
+		expect(refusal({ ...storedEntry, error: { message: "the card was declined" } })).toContain(
+			"its error carries no error name",
+		)
+		expect(refusal({ ...storedEntry, error: { name: "Error" } })).toContain(
+			"its error carries no error message",
+		)
+		expect(refusal({ ...storedEntry, error: { ...storedEntry.error, stack: 3 } })).toContain(
+			"its error carries a stack that is not text",
+		)
+	})
+
+	test("refuses an error whose cause is not a serialized one", () => {
+		const error = { ...storedEntry.error, cause: { message: "the acquirer timed out" } }
+
+		expect(refusal({ ...storedEntry, error })).toContain("its error cause carries no error name")
+	})
+
+	test("refuses a child_dead record holding no children", () => {
+		expect(refusal({ ...storedEntry, reason: "child_dead" })).toContain(
+			'it was buried for "child_dead" and its children are undefined, which is not a list',
+		)
+	})
+
+	test("refuses a child that names no slot it filled", () => {
+		const stored = { ...storedEntry, reason: "child_dead", children: [{ value: { rows: 2 } }] }
+
+		expect(refusal(stored)).toContain('its child {"value":{"rows":2}} names no slot it filled')
+	})
+
+	test("refuses children on a burial no child caused", () => {
+		expect(refusal({ ...storedEntry, children: [ledgerResult] })).toContain(
+			'it was buried for "attempts_exhausted" and still carries children',
+		)
+	})
+
+	test("names the one thing an operator can do with a record it refuses", () => {
+		expect(refusal({ ...storedEntry, reason: "expired" })).toContain("jobs.dead.discard(id)")
 	})
 })

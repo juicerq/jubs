@@ -951,6 +951,7 @@ describe("dead.replay of a flow job", () => {
 			envelope: zipEnvelope,
 			error: { name: dead.name, message: dead.message },
 			reason: "child_dead",
+			children: [],
 		})
 
 		const buried = await jobs.dead.list("nfe")

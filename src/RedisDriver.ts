@@ -16,7 +16,7 @@ import {
 	type WorkerOptions,
 } from "bullmq"
 import { CANCEL_MARK_TTL_MS, type RunningDelivery } from "@/Cancellation"
-import { type DeadEntry, deadQueueName } from "@/Dead"
+import { deadQueueName, readDeadEntry } from "@/Dead"
 import type { Delivery, ResolvedUnique } from "@/Delivery"
 import type {
 	CancelResult,
@@ -885,11 +885,25 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			},
 
 			async list(queue) {
-				const waiting = await queueFor(deadQueueName(queue)).getWaiting()
+				const dead = deadQueueName(queue)
+				const waiting = await queueFor(dead).getWaiting()
 
-				return waiting.flatMap((job) =>
-					job.id ? [{ id: job.id, entry: job.data as DeadEntry }] : [],
-				)
+				return waiting.flatMap((job) => {
+					if (!job.id) {
+						return []
+					}
+
+					try {
+						return [{ id: job.id, entry: readDeadEntry(job.data) }]
+					} catch (unreadable: unknown) {
+						console.error(
+							`jubs: the dead queue "${dead}" holds a record this library cannot read, and it is left out of jobs.dead.list("${queue}") so the records beside it stay reachable — drop it with jobs.dead.discard("${composeJobId(dead, job.id)}")`,
+							unreadable,
+						)
+
+						return []
+					}
+				})
 			},
 
 			async read(queue, id) {
@@ -899,7 +913,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 					return undefined
 				}
 
-				return job.data as DeadEntry
+				return readDeadEntry(job.data)
 			},
 
 			async remove(queue, id) {

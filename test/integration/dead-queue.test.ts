@@ -1,8 +1,10 @@
-import { afterAll, describe, expect, test } from "bun:test"
+import { afterAll, describe, expect, jest, test } from "bun:test"
 import { type } from "arktype"
 import { Queue } from "bullmq"
 import IORedis from "ioredis"
+import { deadQueueName } from "@/Dead"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
+import { composeJobId } from "@/JobId"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
 import { liveId } from "../support/JobIds"
 import { waitFor, waitForFinished } from "../support/Wait"
@@ -54,6 +56,46 @@ async function freshQueues(queue: string): Promise<{ live: Queue; dead: Queue }>
 	await dead.obliterate({ force: true })
 
 	return { live, dead }
+}
+
+const UNREADABLE_REASON = "expired"
+
+async function unreadableBesideHealthy(name: string) {
+	const chargeCard = chargeCardOn(scoped(name))
+	const { live, dead } = await freshQueues(chargeCard.queue)
+
+	const jobs = createJobs({
+		driver: redisDriver(workerConnection),
+		deadQueues: [chargeCard.queue],
+		definitions: [chargeCard],
+	})
+
+	const runtime = await jobs.start([
+		defineHandler(chargeCard, async () => {
+			throw new Error("the card was declined")
+		}),
+	])
+
+	const enqueued = await jobs.enqueue(chargeCard, { cents: "500" })
+
+	await waitForFinished(live, storedId(enqueued))
+
+	const [healthy] = await dead.getWaiting()
+
+	if (!healthy) {
+		throw new Error(`the failing job on ${chargeCard.queue} left no dead record to copy`)
+	}
+
+	const unreadable = await dead.add(healthy.name, { ...healthy.data, reason: UNREADABLE_REASON })
+
+	return {
+		jobs,
+		runtime,
+		dead,
+		queue: chargeCard.queue,
+		healthyJobId: String(healthy.data.jobId),
+		unreadableId: composeJobId(deadQueueName(chargeCard.queue), unreadable.id ?? ""),
+	}
 }
 
 afterAll(async () => {
@@ -336,6 +378,64 @@ describe("dead queue over redis", () => {
 		const failure = await jobs.dead.discard(id).catch((error: unknown) => error)
 
 		expect((failure as Error).message).toContain(id)
+
+		await runtime.close()
+	})
+})
+
+describe("a dead record over redis this library cannot read", () => {
+	test("refuses to replay a record buried for a reason no job is buried for", async () => {
+		const { jobs, runtime, unreadableId } = await unreadableBesideHealthy(
+			"jubs.test.dead-unreadable",
+		)
+
+		const failure = await jobs.dead.replay(unreadableId).catch((error: unknown) => error)
+
+		expect((failure as Error).name).toBe("DeadRecordError")
+		expect((failure as Error).message).toContain(
+			`its reason "${UNREADABLE_REASON}" is not one a job is buried for`,
+		)
+
+		await runtime.close()
+	})
+
+	test("leaves the record out of the listing and keeps the healthy record beside it", async () => {
+		const { jobs, runtime, dead, queue, healthyJobId } = await unreadableBesideHealthy(
+			"jubs.test.dead-unreadable-beside",
+		)
+
+		const reported = jest.spyOn(console, "error").mockImplementation(() => {})
+		const listed = await jobs.dead.list(queue)
+
+		reported.mockRestore()
+
+		expect(listed).toHaveLength(1)
+		expect(listed[0]?.jobId).toBe(healthyJobId)
+		expect(listed[0]?.reason).toBe("attempts_exhausted")
+		expect(await dead.getWaitingCount()).toBe(2)
+
+		await runtime.close()
+	})
+
+	test("names the record it left out by the id that discards it, and discard drops it", async () => {
+		const { jobs, runtime, dead, queue, unreadableId } = await unreadableBesideHealthy(
+			"jubs.test.dead-unreadable-discard",
+		)
+
+		const reported = jest.spyOn(console, "error").mockImplementation(() => {})
+
+		await jobs.dead.list(queue)
+
+		const message = String(reported.mock.calls[0]?.[0])
+
+		reported.mockRestore()
+
+		expect(message).toContain(`jobs.dead.discard("${unreadableId}")`)
+
+		await jobs.dead.discard(unreadableId)
+
+		expect(await dead.getWaitingCount()).toBe(1)
+		expect(await jobs.dead.list(queue)).toHaveLength(1)
 
 		await runtime.close()
 	})

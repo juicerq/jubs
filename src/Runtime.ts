@@ -1,7 +1,7 @@
 import { UnrecoverableError } from "bullmq"
 import { CANCEL_SWEEP_MS, CancelledError, type RunningDelivery } from "@/Cancellation"
 import type { JobsConfig } from "@/Client"
-import { childDead, deadQueueName, deadReason } from "@/Dead"
+import { burialFor, deadQueueName } from "@/Dead"
 import type { JobDefinition, JobHandler } from "@/Definition"
 import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type {
@@ -433,18 +433,15 @@ export async function startRuntime(
 
 		await notify(config.hooks?.onAttemptFailed, "onAttemptFailed", failure)
 
-		const reason = deadReason(delivery, error)
+		const burial = burialFor(delivery, error)
 
-		if (!reason) {
+		if (!burial) {
 			return
 		}
 
 		if (deadQueues.has(event.queue)) {
-			const dead = childDead(error)
-			const buried = { jobId: event.id, envelope, error: failure.error, reason }
-
 			await config.driver.dead
-				.bury(event.queue, dead ? { ...buried, children: dead.results } : buried)
+				.bury(event.queue, { jobId: event.id, envelope, error: failure.error, ...burial })
 				.catch((refused: unknown) => {
 					console.error(
 						`jubs: the dead queue did not keep job "${event.name}"; the job outcome is unchanged`,
