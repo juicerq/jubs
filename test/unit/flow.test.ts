@@ -846,6 +846,52 @@ describe("a child still in flight when the parent is delivered", () => {
 		expect(reported).toEqual([])
 		expect(buried).toEqual([])
 	})
+
+	test("buries nothing on the last allowed attempt, where the parent goes back to waiting-children alive", async () => {
+		const driver = recordingDriver()
+		const reported: string[] = []
+		const buried: string[] = []
+
+		const jobs = createJobs({
+			driver,
+			deadQueues: ["nfe"],
+			hooks: {
+				onAttemptFailed: (event) => {
+					reported.push(event.name)
+				},
+				onDead: (event) => {
+					buried.push(event.name)
+				},
+			},
+		})
+
+		let ran = 0
+
+		driver.keepFlowState({ results: [manifestResult], failures: [], pending: 1 })
+
+		await jobs.start([
+			defineHandler(zipExport, async () => {
+				ran += 1
+
+				return { url: "https://a.example/1" }
+			}),
+		])
+
+		const failure = await driver
+			.deliver("nfe", {
+				id: "1",
+				attempt: 5,
+				maxAttempts: 5,
+				envelope: { ...zipEnvelope, slots: { xmls: 1, manifest: 1 } },
+			})
+			.catch((error: unknown) => error)
+
+		expect(ran).toBe(0)
+		expect(failure).toBeInstanceOf(ChildrenPendingError)
+		expect((failure as Error).message).toContain("spending no attempt")
+		expect(buried).toEqual([])
+		expect(reported).toEqual([])
+	})
 })
 
 describe("a flow read that fails on the way to the handler", () => {
