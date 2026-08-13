@@ -2,7 +2,7 @@ import { UnrecoverableError } from "bullmq"
 import { CANCEL_SWEEP_MS, CancelledError, type RunningDelivery } from "@/Cancellation"
 import type { JobsConfig } from "@/Client"
 import { childDead, deadQueueName, deadReason } from "@/Dead"
-import { type JobDefinition, type JobHandler, payloadVersion } from "@/Definition"
+import type { JobDefinition, JobHandler } from "@/Definition"
 import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type {
 	ConsumeRequest,
@@ -12,7 +12,7 @@ import type {
 	QueueLimiter,
 	ScheduleUpsert,
 } from "@/Driver"
-import { type Envelope, readEnvelope } from "@/Envelope"
+import { type Envelope, readEnvelope, writeEnvelope } from "@/Envelope"
 import { serializeError } from "@/Failure"
 import { ChildDeadError, ChildrenPendingError, ChildrenShortError, childrenFor } from "@/Flow"
 import { type JobEvent, type JobFailureEvent, notify } from "@/Hooks"
@@ -193,12 +193,7 @@ async function scheduleUpsert(
 
 	const upsert: ScheduleUpsert = {
 		recurrence: schedule.recurrence,
-		envelope: {
-			v: payloadVersion(definition),
-			name: definition.name,
-			data: schedule.data,
-			origin: "schedule",
-		},
+		envelope: writeEnvelope(definition, schedule.data, "schedule"),
 		delivery,
 	}
 

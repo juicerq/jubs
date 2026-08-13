@@ -1,12 +1,7 @@
-import {
-	type AnyDefinition,
-	type AwaitsMap,
-	type JobDefinition,
-	payloadVersion,
-} from "@/Definition"
+import type { AnyDefinition, AwaitsMap, JobDefinition } from "@/Definition"
 import { resolveDelivery } from "@/Delivery"
 import type { ChildResult, FlowChildNode, FlowNode, FlowState, FlowStore } from "@/Driver"
-import type { Envelope } from "@/Envelope"
+import { type Envelope, writeEnvelope } from "@/Envelope"
 import { validatePayload } from "@/Payload"
 import { validateResult } from "@/Result"
 
@@ -384,12 +379,7 @@ export async function composeFlow(
 
 	const children = await Promise.all(composing.flatMap((slot) => slot.nodes))
 
-	const envelope: Envelope = {
-		v: payloadVersion(definition),
-		name: definition.name,
-		data,
-		origin: "flow",
-	}
+	const envelope = writeEnvelope(definition, data, "flow")
 
 	if (composing.length === 0) {
 		return { queue: definition.queue, envelope, delivery, children }

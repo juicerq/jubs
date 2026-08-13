@@ -1,11 +1,6 @@
-import type { Origin } from "@/Definition"
+import { type JobDefinition, type Origin, payloadVersion } from "@/Definition"
 
 const ORIGINS: readonly Origin[] = ["direct", "schedule", "flow", "relay"]
-
-export interface TraceContext {
-	readonly traceparent: string
-	readonly tracestate?: string
-}
 
 export interface Envelope {
 	readonly v: number
@@ -28,7 +23,6 @@ export interface Envelope {
 	 * absence is read for what it is — a job that has no children at all.
 	 */
 	readonly slots?: Readonly<Record<string, number>>
-	readonly trace?: TraceContext
 }
 
 export class EnvelopeError extends Error {
@@ -105,4 +99,13 @@ export function readEnvelope(stored: unknown): Envelope {
 	}
 
 	return { ...read, slots }
+}
+
+export function writeEnvelope(definition: JobDefinition, data: unknown, origin: Origin): Envelope {
+	return {
+		v: payloadVersion(definition),
+		name: definition.name,
+		data,
+		origin,
+	}
 }

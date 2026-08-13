@@ -7,13 +7,7 @@ import {
 	runAtomicBlock,
 } from "@/Atomic"
 import { type DeadJob, deadQueueName, liveQueueName } from "@/Dead"
-import {
-	type AwaitsMap,
-	type EnqueueAwaits,
-	type JobDefinition,
-	type JobHandler,
-	payloadVersion,
-} from "@/Definition"
+import type { AwaitsMap, EnqueueAwaits, JobDefinition, JobHandler } from "@/Definition"
 import { resolveDelivery, resolveDeliveryWithoutUniqueness } from "@/Delivery"
 import type {
 	CancelResult,
@@ -23,7 +17,7 @@ import type {
 	JobSnapshot,
 	RetryResult,
 } from "@/Driver"
-import type { Envelope } from "@/Envelope"
+import { type Envelope, writeEnvelope } from "@/Envelope"
 import { composeFlow, slotsOf } from "@/Flow"
 import type { JobHooks } from "@/Hooks"
 import { idempotencyKeyFor } from "@/Idempotency"
@@ -472,12 +466,7 @@ export function createJobs(config: JobsConfig): JobsClient {
 
 			const request: EnqueueRequest = {
 				queue: definition.queue,
-				envelope: {
-					v: payloadVersion(definition),
-					name: definition.name,
-					data,
-					origin: "direct",
-				},
+				envelope: writeEnvelope(definition, data, "direct"),
 				delivery: resolveDelivery(definition, validated),
 			}
 

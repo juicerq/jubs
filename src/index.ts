@@ -34,7 +34,7 @@ export type {
 	RetryResult,
 	ScheduleUpsert,
 } from "@/Driver"
-export type { Envelope, TraceContext } from "@/Envelope"
+export type { Envelope } from "@/Envelope"
 export type { SerializedError } from "@/Failure"
 export type { JobEvent, JobFailureEvent, JobHooks } from "@/Hooks"
 export { type IdempotencyStore, LeaseHeldError } from "@/Idempotency"
