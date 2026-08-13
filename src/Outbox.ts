@@ -1,9 +1,9 @@
 import type { JobDefinition } from "@/Definition"
 import { resolveDeliveryWithoutUniqueness } from "@/Delivery"
-import type { JobDriver } from "@/Driver"
+import type { EnqueueRequest, JobDriver } from "@/Driver"
 import type { Envelope } from "@/Envelope"
 import { slotsOf } from "@/Flow"
-import { migrateEnvelope } from "@/Migration"
+import { migrateEnvelope, VersionAheadError } from "@/Migration"
 import { validatePayload } from "@/Payload"
 
 /**
@@ -106,11 +106,43 @@ function outboxJobId(rowId: string): string {
 	return `outbox-${rowId}`
 }
 
+/**
+ * Why the relay left a row behind.
+ *
+ * `driver_failed` and `version_ahead` are the two rows that are good: the
+ * delivery failed inside the driver, or a newer deploy wrote the payload, and
+ * the next cycle delivers them as soon as the driver answers or the deploy
+ * finishes. `unrecoverable` is a row this process cannot deliver until
+ * something outside the relay changes — a definition it does not know, a
+ * definition that waits on slots, a row id a job id cannot be derived from, a
+ * payload its schema refuses, or a migration of yours that threw.
+ */
+export type LeftBehindReason = "driver_failed" | "version_ahead" | "unrecoverable"
+
+export interface LeftBehindEvent {
+	/** The id the outbox handed back from `claim`, as `ClaimedEnvelope.id`. */
+	readonly rowId: string
+	/** The name of the job the row carries. */
+	readonly name: string
+	readonly reason: LeftBehindReason
+	/**
+	 * The failure the row was left behind on, as it was thrown — never the report
+	 * the relay writes to the console around it.
+	 */
+	readonly error: Error
+}
+
 export interface RelayOptions {
 	/** How many rows one cycle claims. 100 by default. */
 	readonly limit?: number
 	/** How long the relay waits between two cycles. 1000ms by default. */
 	readonly intervalMs?: number
+	/**
+	 * Runs once for every row the relay leaves behind, with the reason it was
+	 * left behind on. The console report happens either way, so this hook is
+	 * where an adapter writes a status of its own onto the row.
+	 */
+	readonly onLeftBehind?: (event: LeftBehindEvent) => void | Promise<void>
 }
 
 export interface JobsRelay {
@@ -148,8 +180,30 @@ function definitionOf(config: RelayConfig, claimed: ClaimedEnvelope): JobDefinit
 	return definition
 }
 
+function leftBehindEvent(
+	row: ClaimedEnvelope,
+	reason: LeftBehindReason,
+	failure: unknown,
+): LeftBehindEvent {
+	return {
+		rowId: row.id,
+		name: row.envelope.name,
+		reason,
+		error: failure instanceof Error ? failure : new Error(String(failure)),
+	}
+}
+
 /**
- * Enqueues one claimed row, under the id that row derives.
+ * Enqueues one claimed row, under the id that row derives, and answers with the
+ * event of a row it left behind — `undefined` for a row that reached the queue.
+ *
+ * Preparing the request and handing it to the driver are two `try` blocks
+ * because the split is the classification: everything that fails before the
+ * driver is this process's own doing, and only what fails inside `enqueue` is
+ * the driver's. Deriving the job id sits on the preparation side for that
+ * reason — a row id no id can be derived from is a broken row, not a driver
+ * that stopped answering, and reporting it as one would tell an operator to
+ * wait for a connection that is already up.
  *
  * The delivery is resolved **without** the uniqueness the definition declares,
  * the way a replay resolves it. BullMQ reads the derived id first and the
@@ -157,17 +211,45 @@ function definitionOf(config: RelayConfig, claimed: ClaimedEnvelope): JobDefinit
  * answer with that job's id: the row's own job would never be created, and
  * nothing would say so.
  */
-async function deliver(config: RelayConfig, claimed: ClaimedEnvelope): Promise<void> {
-	const definition = definitionOf(config, claimed)
-	const migrated = await migrateEnvelope(definition, claimed.envelope)
-	const validated = await validatePayload(definition, migrated)
+async function deliver(
+	config: RelayConfig,
+	claimed: ClaimedEnvelope,
+): Promise<LeftBehindEvent | undefined> {
+	let request: EnqueueRequest
 
-	await config.driver.enqueue({
-		queue: definition.queue,
-		envelope: claimed.envelope,
-		delivery: resolveDeliveryWithoutUniqueness(definition, validated),
-		jobId: outboxJobId(claimed.id),
-	})
+	try {
+		const definition = definitionOf(config, claimed)
+		const migrated = await migrateEnvelope(definition, claimed.envelope)
+		const validated = await validatePayload(definition, migrated)
+
+		request = {
+			queue: definition.queue,
+			envelope: claimed.envelope,
+			delivery: resolveDeliveryWithoutUniqueness(definition, validated),
+			jobId: outboxJobId(claimed.id),
+		}
+	} catch (failure) {
+		const reason = failure instanceof VersionAheadError ? "version_ahead" : "unrecoverable"
+
+		return leftBehindEvent(claimed, reason, failure)
+	}
+
+	try {
+		await config.driver.enqueue(request)
+	} catch (failure) {
+		return leftBehindEvent(claimed, "driver_failed", failure)
+	}
+
+	return undefined
+}
+
+const ADVICE: Record<LeftBehindReason, string> = {
+	driver_failed:
+		"that row is not broken and its job is not lost: the delivery failed inside the driver, so nothing of it reached the queue, and the next cycle claims the row again and delivers it as soon as the driver answers. Look at Redis and at the connection the driver holds, and leave the row in the claim: marking it delivered by hand or deleting it loses a job that was committed together with the state change beside it. An outbox that counts claims gives up on the row before the connection comes back — the adapter in the README stops claiming a row after ten — so read that count, and reset it once the driver answers again.",
+	version_ahead:
+		"that row is not broken, and this process alone cannot deliver it: a newer deploy wrote its payload, and a process running that version delivers it as soon as it claims it. Wait for the deploy to finish, and leave the row in the claim: marking it delivered by hand or deleting it loses a job that was committed together with the state change beside it. An outbox that counts claims gives up on the row before the deploy does — the adapter in the README stops claiming a row after ten — so read that count, and reset it if the deploy takes long.",
+	unrecoverable:
+		"that row alone is not enqueued and stays unmarked, so every cycle claims it again and fails on it again until something outside the relay changes it. Register on the relaying client the definition the failure names, or take the row out of the claim: mark it delivered by hand, or delete it.",
 }
 
 /**
@@ -176,16 +258,34 @@ async function deliver(config: RelayConfig, claimed: ClaimedEnvelope): Promise<v
  * One row nothing can deliver holds no other row back: the cycle carries on
  * through the rows around it and marks those delivered. The row itself stays
  * where it is, and every cycle claims it again and fails on it again, so the
- * failure names the row an operator has to act on, and the two acts that end
- * it.
+ * failure names the row an operator has to act on, and what ends it: the two
+ * acts that take a broken row out of the claim, or — for a row a newer deploy
+ * wrote, and for a row whose delivery failed inside the driver — the deploy
+ * finishing and the driver answering again, since those rows are good and
+ * taking them out of the claim would lose the jobs they hold.
  */
-function leftBehind(row: ClaimedEnvelope, failure: unknown): Error {
-	const reason = failure instanceof Error ? failure.message : String(failure)
-
+function leftBehind(event: LeftBehindEvent): Error {
 	return new Error(
-		`jubs: the outbox row "${row.id}" was left behind, and the relay went on with the rows around it — that row alone is not enqueued and stays unmarked, so every cycle claims it again and fails on it again until something outside the relay changes it. Register on the relaying client the definition the failure names, or take the row out of the claim: mark it delivered by hand, or delete it. The failure it was left behind on: ${reason}`,
-		{ cause: failure },
+		`jubs: the outbox row "${event.rowId}" was left behind, and the relay went on with the rows around it — ${ADVICE[event.reason]} The failure it was left behind on: ${event.error.message}`,
+		{ cause: event.error },
 	)
+}
+
+async function reportLeftBehind(config: RelayConfig, event: LeftBehindEvent): Promise<void> {
+	console.error(leftBehind(event))
+
+	if (!config.onLeftBehind) {
+		return
+	}
+
+	try {
+		await config.onLeftBehind(event)
+	} catch (error) {
+		console.error(
+			`jubs: the onLeftBehind hook threw for the outbox row "${event.rowId}"; the row is left behind either way, and the rows around it are delivered and marked`,
+			error,
+		)
+	}
 }
 
 /**
@@ -204,13 +304,14 @@ async function runRelayCycle(config: RelayConfig): Promise<void> {
 	const delivered: string[] = []
 
 	for (const row of claimed) {
-		await deliver(config, row)
-			.then(() => {
-				delivered.push(row.id)
-			})
-			.catch((failure: unknown) => {
-				console.error(leftBehind(row, failure))
-			})
+		const event = await deliver(config, row)
+
+		if (!event) {
+			delivered.push(row.id)
+			continue
+		}
+
+		await reportLeftBehind(config, event)
 	}
 
 	if (delivered.length === 0) {

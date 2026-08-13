@@ -557,6 +557,7 @@ One cycle claims a batch of rows, enqueues a job for each, and marks the rows it
 
 - `limit` — how many rows one cycle claims. 100 by default.
 - `intervalMs` — how long the relay waits between two cycles. 1000 by default.
+- `onLeftBehind` — runs for every row the relay leaves behind, with the reason it was left behind on. See [what the outbox refuses](#what-the-outbox-refuses).
 
 **One cycle runs at a time.** A cycle that outruns the interval holds the next tick back instead of running beside itself.
 
@@ -592,6 +593,24 @@ The same rule sets what your row ids may be. **A row id carrying a colon is refu
 select id, envelope, claims from jubs_outbox where delivered_at is null and claims >= 10;
 ```
 
+**A hook says why the row was left behind.** The relay classifies the failure and hands it to `onLeftBehind`, so your table can keep a status of its own:
+
+```ts
+const relay = jobs.startRelay({
+	async onLeftBehind({ rowId, name, reason, error }) {
+		await db
+			.updateTable("jubs_outbox")
+			.set({ status: reason, failure: `${name}: ${error.message}` })
+			.where("id", "=", rowId)
+			.execute()
+	},
+})
+```
+
+`reason` is one of three. `driver_failed` is a delivery that failed inside the driver: the row is good and its job is not lost. `version_ahead` is a payload a newer deploy wrote: the row is good, and a process running that version delivers it. `unrecoverable` is a row this process cannot deliver until something outside the relay changes — an unregistered definition, a definition that waits on children, a row id no job id can be derived from, a payload its schema refuses, or a migration of yours that threw. The two good reasons are the rows to leave in the claim; only `unrecoverable` is the row an operator takes out of it.
+
+The console report happens either way, and the hook is what you add on top of it. It may be async, and the cycle awaits it before it marks the rows it delivered. A hook that throws is reported to the console and changes nothing else: the row stays left behind, and the rows around it are delivered and marked as usual.
+
 ### Running more than one relay
 
 Nothing in this library keeps two relays off one row. **The claim does**, and the claim is yours: lock the rows you read and skip the rows another relay holds. The adapter below does it with `for update skip locked`, and leases the rows it claims, so a relay killed mid-cycle releases its rows after a minute instead of holding them until someone notices.
@@ -607,13 +626,15 @@ create table jubs_outbox (
 	claims integer not null default 0,
 	claimed_at timestamptz,
 	delivered_at timestamptz,
+	status text,
+	failure text,
 	created_at timestamptz not null default now()
 );
 
 create index jubs_outbox_claimable on jubs_outbox (id) where delivered_at is null;
 ```
 
-`id` is a `bigserial`, so it carries no colon and is never empty. The partial index is what keeps the claim off the rows already delivered, however long you keep them. `claims` counts how many times a row has been handed to a relay, and is what lets the claim give up on a row it cannot get past.
+`id` is a `bigserial`, so it carries no colon and is never empty. The partial index is what keeps the claim off the rows already delivered, however long you keep them. `claims` counts how many times a row has been handed to a relay, and is what lets the claim give up on a row it cannot get past. `status` and `failure` are what the `onLeftBehind` hook above writes: the reason the relay classified, and the failure it was left behind on. The relay never reads them, so they stay null until a row is left behind, and dropping both columns costs you only that hook.
 
 ```ts
 import type { Envelope, Outbox } from "@juicerq/jubs"
@@ -626,6 +647,8 @@ export interface Database {
 		claims: Generated<number>
 		claimed_at: Date | null
 		delivered_at: Date | null
+		status: string | null
+		failure: string | null
 		created_at: Generated<Date>
 	}
 }
@@ -688,6 +711,8 @@ export function kyselyOutbox(db: Kysely<Database>): Outbox {
 The claim is one statement: the inner select locks the rows it reads and skips the ones another relay holds, and the update stamps `claimed_at` on exactly those. A row is claimable again once its lease has run out, which is what makes a killed relay's rows move on their own.
 
 `MAX_CLAIMS` is where the poisoned row is dealt with, and it belongs here rather than in the library — how many attempts a row deserves is a policy about your table. A row handed out ten times and never marked stops being claimed, so it stops taking a place in every batch. Nothing is lost by giving up: the row is still there, with its envelope and its count, and the query above is what reads it. **Read it.** A row counts a claim whether it failed on its own or a relay died holding it, so a healthy row can reach ten as well — and a row that stopped being claimed is a job that will never run until you act.
+
+**A `version_ahead` row is the healthy row that reaches ten.** During a rolling deploy an old pod claims a row a new pod wrote, cannot read it, and leaves it behind; at the default interval and a one-minute lease it counts ten claims in about ten minutes, and the claim gives up on it. The row is good, and a new pod would deliver it. Do not mark it delivered and do not delete it — that loses a job committed with the state change beside it. Let the deploy finish, and if it ran past ten claims, put the row back in the claim by zeroing its count: `update jubs_outbox set claims = 0 where id = $1`.
 
 `markDelivered` stamps a date rather than deleting, so the table doubles as the record of what was enqueued and when. Delete instead if you would rather not sweep it; the relay reads neither column.
 
