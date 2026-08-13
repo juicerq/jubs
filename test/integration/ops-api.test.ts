@@ -16,6 +16,7 @@ import {
 } from "@/index"
 import { CANCEL_KEY_PREFIX } from "@/RedisDriver"
 import { liveId } from "../support/JobIds"
+import { waitFor } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -30,20 +31,6 @@ function inspect(queue: string): Queue {
 	opened.push(handle)
 
 	return handle
-}
-
-async function waitFor(ready: () => Promise<boolean>): Promise<void> {
-	const deadline = Date.now() + 4_000
-
-	while (Date.now() < deadline) {
-		if (await ready()) {
-			return
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error("the condition did not hold in time")
 }
 
 /**

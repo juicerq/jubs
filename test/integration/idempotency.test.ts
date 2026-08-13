@@ -7,6 +7,7 @@ import IORedis from "ioredis"
 import { IDEMPOTENCY_MAX_RESULT_BYTES } from "@/Idempotency"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
+import { waitFor } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -35,20 +36,6 @@ function leaseKey(jobName: string, key: string): string {
 async function scrub(queue: Queue): Promise<void> {
 	await queue.pause()
 	await queue.obliterate({ force: true })
-}
-
-async function waitFor(reached: () => boolean | Promise<boolean>): Promise<void> {
-	const deadline = Date.now() + 8_000
-
-	while (Date.now() < deadline) {
-		if (await reached()) {
-			return
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error("the executions expected by this test did not arrive in time")
 }
 
 const ROOT = join(import.meta.dir, "..", "..")

@@ -12,6 +12,7 @@ import {
 	type Origin,
 	redisDriver,
 } from "@/index"
+import { waitFor } from "../support/Wait"
 import { scoped } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -26,20 +27,6 @@ function inspect(queue: string): Queue {
 	opened.push(handle)
 
 	return handle
-}
-
-async function waitFor(reached: () => boolean): Promise<void> {
-	const deadline = Date.now() + 4_000
-
-	while (Date.now() < deadline) {
-		if (reached()) {
-			return
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error("the executions expected by this test did not arrive in time")
 }
 
 afterAll(async () => {

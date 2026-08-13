@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { type } from "arktype"
-import { type Job, Queue } from "bullmq"
+import { Queue } from "bullmq"
 import IORedis from "ioredis"
 import {
 	createJobs,
@@ -11,6 +11,7 @@ import {
 	redisDriver,
 } from "@/index"
 import { liveId } from "../support/JobIds"
+import { waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -26,22 +27,6 @@ function inspect(queue: string): Queue {
 	opened.push(handle)
 
 	return handle
-}
-
-async function waitForFinished(queue: Queue, id: string): Promise<Job> {
-	const deadline = Date.now() + 4_000
-
-	while (Date.now() < deadline) {
-		const job = await queue.getJob(id)
-
-		if (job?.finishedOn) {
-			return job
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error(`job ${id} on ${queue.name} did not finish in time`)
 }
 
 afterAll(async () => {

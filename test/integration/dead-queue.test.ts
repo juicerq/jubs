@@ -1,10 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { type } from "arktype"
-import { type Job, Queue } from "bullmq"
+import { Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
 import { liveId } from "../support/JobIds"
+import { waitFor, waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -34,36 +35,6 @@ async function keySettled(lease: string): Promise<boolean> {
 	const stored = await inspectorConnection.get(lease)
 
 	return !!stored && !stored.startsWith(RUNNING_PREFIX)
-}
-
-async function waitFor(reached: () => boolean | Promise<boolean>): Promise<void> {
-	const deadline = Date.now() + 8_000
-
-	while (Date.now() < deadline) {
-		if (await reached()) {
-			return
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error("the executions expected by this test did not arrive in time")
-}
-
-async function waitForFinished(queue: Queue, id: string): Promise<Job> {
-	const deadline = Date.now() + 4_000
-
-	while (Date.now() < deadline) {
-		const job = await queue.getJob(id)
-
-		if (job?.finishedOn) {
-			return job
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error(`job ${id} on ${queue.name} did not finish in time`)
 }
 
 function chargeCardOn(queue: string) {

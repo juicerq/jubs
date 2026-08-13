@@ -1,9 +1,10 @@
 import { afterAll, describe, expect, test } from "bun:test"
 import { type } from "arktype"
-import { type Job, Queue } from "bullmq"
+import { Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
+import { waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -22,22 +23,6 @@ async function freshQueue(queue: string): Promise<Queue> {
 	await dead.obliterate({ force: true })
 
 	return live
-}
-
-async function waitForFinished(queue: Queue, id: string): Promise<Job> {
-	const deadline = Date.now() + 8_000
-
-	while (Date.now() < deadline) {
-		const job = await queue.getJob(id)
-
-		if (job?.finishedOn) {
-			return job
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error(`job ${id} on ${queue.name} did not finish in time`)
 }
 
 const leased: string[] = []

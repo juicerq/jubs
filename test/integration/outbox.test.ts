@@ -11,6 +11,7 @@ import {
 	type Outbox,
 	redisDriver,
 } from "@/index"
+import { waitFor } from "../support/Wait"
 import { scoped } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -79,20 +80,6 @@ function memoryOutbox(): MemoryOutbox {
 	}
 
 	return outbox
-}
-
-async function waitFor(reached: () => boolean | Promise<boolean>): Promise<void> {
-	const deadline = Date.now() + 4_000
-
-	while (Date.now() < deadline) {
-		if (await reached()) {
-			return
-		}
-
-		await Bun.sleep(25)
-	}
-
-	throw new Error("the outbox suite waited too long for what it expected")
 }
 
 afterAll(async () => {
