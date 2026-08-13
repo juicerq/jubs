@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { JubsDashboard } from "@/dashboard/index"
+import { expressDashboard, fastifyDashboard, mountDashboard } from "@/dashboard/index"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { memoryDriver } from "@/testing/index"
 
@@ -15,7 +15,9 @@ describe("package entries", () => {
 		expect(typeof memoryDriver).toBe("function")
 	})
 
-	test("every other subpath exposes its namespace", () => {
-		expect(JubsDashboard).toEqual({})
+	test("the dashboard subpath exposes the open mount and the two it ships", () => {
+		expect(typeof mountDashboard).toBe("function")
+		expect(typeof expressDashboard).toBe("function")
+		expect(typeof fastifyDashboard).toBe("function")
 	})
 })

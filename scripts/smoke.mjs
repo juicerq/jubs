@@ -7,7 +7,7 @@ import { fileURLToPath } from "node:url"
 const entries = {
 	".": ["createJobs", "defineJob", "defineHandler", "redisDriver"],
 	"./testing": ["memoryDriver"],
-	"./dashboard": ["JubsDashboard"],
+	"./dashboard": ["mountDashboard", "expressDashboard", "fastifyDashboard"],
 }
 const subpaths = Object.keys(entries)
 const root = fileURLToPath(new URL("..", import.meta.url))
