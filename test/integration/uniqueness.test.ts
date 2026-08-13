@@ -5,8 +5,7 @@ import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { liveId } from "../support/JobIds"
 import { scoped } from "./namespace"
-
-const REDIS_URL = process.env.REDIS_URL || "redis://127.0.0.1:6379"
+import { REDIS_URL } from "./redis"
 
 const workerConnection = new IORedis(REDIS_URL, { maxRetriesPerRequest: null })
 const inspectorConnection = new IORedis(REDIS_URL)
