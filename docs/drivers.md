@@ -78,22 +78,28 @@ What `run` resolves with is what the handler returned. Keep it if you support fl
 | `ChildrenPendingError` | puts the job back to waiting on its children                       |
 
 ```ts
-import { LeaseHeldError, ShutdownAbortError } from "@juicerq/jubs"
+import { ChildrenPendingError, LeaseHeldError, ShutdownAbortError } from "@juicerq/jubs"
 
-function postponedBy(error: unknown): number | undefined {
+type Answer = { postponeMs: number } | { waitOnChildren: true } | undefined
+
+function notAFailure(error: unknown): Answer {
 	if (error instanceof ShutdownAbortError) {
-		return error.delayMs
+		return { postponeMs: error.delayMs }
 	}
 
 	if (error instanceof LeaseHeldError) {
-		return 1_000
+		return { postponeMs: 1_000 }
+	}
+
+	if (error instanceof ChildrenPendingError) {
+		return { waitOnChildren: true }
 	}
 
 	return undefined
 }
 ```
 
-`ShutdownAbortError` names its own delay, because a deploy that cut a handler short should cost the job nothing. `LeaseHeldError` names none: `redisDriver` picks one that doubles from 100ms up to a second, so a delivery that keeps meeting a held key backs off instead of spinning. `ChildrenPendingError` is the third, and only a driver that supports flows ever meets it — it is a parent delivered while a child it lost is still running, and the answer is to wait on the children again rather than to run a handler over a slot that is not filled. That class is not exported from `@juicerq/jubs` today, so a driver outside this package cannot narrow to it.
+`ShutdownAbortError` names its own delay, because a deploy that cut a handler short should cost the job nothing. `LeaseHeldError` names none: `redisDriver` picks one that doubles from 100ms up to a second, so a delivery that keeps meeting a held key backs off instead of spinning. `ChildrenPendingError` is the third, and only a driver that supports flows ever meets it — it is a parent delivered while a child it lost is still running, and the answer is to wait on the children again rather than to run a handler over a slot that is not filled. All three are exported from `@juicerq/jubs`, so the `instanceof` above is the whole contract: nothing else on these errors is read, and the message is the one to log if you log anything.
 
 ### Closing
 
