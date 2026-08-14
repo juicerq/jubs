@@ -152,13 +152,14 @@ A flow is for fan-in — one job that needs the results of several. A job that m
 | [The two-process split](https://github.com/juicerq/jubs/blob/main/docs/processes.md)        | why the two processes stay apart, wrapping `enqueue`, and the four checks `start` runs at boot |
 | [Delivery, tuning and shutdown](https://github.com/juicerq/jubs/blob/main/docs/delivery.md) | attempts, backoff, delay, priority, per-queue concurrency and limiter, `timeoutMs`, `close`    |
 | [Uniqueness and idempotency](https://github.com/juicerq/jubs/blob/main/docs/uniqueness.md)  | one job in flight per key, and a job that runs once across a pod restart                       |
-| [The atomic block and the outbox](https://github.com/juicerq/jubs/blob/main/docs/outbox.md) | enqueue inside a database transaction, delivered only once it commits                          |
+| [The atomic block and the outbox](https://github.com/juicerq/jubs/blob/main/docs/outbox.md) | enqueue inside a database transaction, and the relay that delivers it once it commits          |
 | [Scheduling](https://github.com/juicerq/jubs/blob/main/docs/scheduling.md)                  | recurrence declared on the definition — delete it from the code and it stops firing            |
 | [Flows](https://github.com/juicerq/jubs/blob/main/docs/flows.md)                            | a parent job that waits on children and reads what they returned                               |
 | [Validation and versioning](https://github.com/juicerq/jubs/blob/main/docs/versioning.md)   | change a payload shape without losing the jobs already in Redis                                |
 | [Operations](https://github.com/juicerq/jubs/blob/main/docs/operations.md)                  | `get`, `retry`, `cancel`, `pause`, `resume`, the lifecycle hooks, and the dead queue           |
 | [Testing](https://github.com/juicerq/jubs/blob/main/docs/testing.md)                        | `memoryDriver()` — the real validation and the real dispatch, with no Redis                    |
 | [Dashboard](https://github.com/juicerq/jubs/blob/main/docs/dashboard.md)                    | a read-only Bull Board over the queues your definitions use                                    |
+| [Drivers](https://github.com/juicerq/jubs/blob/main/docs/drivers.md)                        | the `JobDriver` seam, and what a store has to guarantee to sit behind it                       |
 
 The [decision records](https://github.com/juicerq/jubs/tree/main/docs/adr) say why the sharp parts are shaped the way they are.
 
