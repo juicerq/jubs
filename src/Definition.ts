@@ -167,7 +167,7 @@ export interface JobDefinition<
 	readonly migrations?: Readonly<Record<number, PayloadMigration>>
 	readonly delivery?: DeliveryPolicy
 	readonly schedule?: Schedule
-	idempotencyKey?(data: unknown): string
+	readonly idempotencyKey?: (data: unknown) => string
 	readonly timeoutMs?: number
 }
 
@@ -340,8 +340,7 @@ export function defineJob<
 		return definition
 	}
 
-	// oxlint-disable-next-line typescript/consistent-type-assertions
-	return { ...definition, delivery: input.delivery as DeliveryPolicy }
+	return { ...definition, delivery: input.delivery }
 }
 
 export function defineHandler<
