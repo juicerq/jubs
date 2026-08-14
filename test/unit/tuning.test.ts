@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { createJobs, defineHandler, defineJob, type JobHandler } from "@/index"
 import { DEFAULT_CONCURRENCY } from "@/Runtime"
 import { memoryDriver } from "@/testing/index"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const sendEmail = defineJob({
@@ -52,8 +53,8 @@ describe("per-queue tuning", () => {
 			.start(handlers, { queues: { reprots: { concurrency: 2 } } })
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("reprots")
-		expect((failure as Error).message).toContain("mail")
+		expect(errorOf(failure).message).toContain("reprots")
+		expect(errorOf(failure).message).toContain("mail")
 		expect(driver.consuming).toEqual([])
 	})
 
@@ -67,7 +68,7 @@ describe("per-queue tuning", () => {
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("reprots")
+		expect(errorOf(failure).message).toContain("reprots")
 		expect(driver.consuming).toEqual([])
 	})
 
@@ -85,7 +86,7 @@ describe("per-queue tuning", () => {
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe(
+		expect(errorOf(failure).message).toBe(
 			'jubs: memoryDriver does not simulate "limiter"; test that behaviour against redisDriver',
 		)
 	})
@@ -105,10 +106,10 @@ describe("per-queue tuning", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain('does not simulate "limiter"')
+		expect(errorOf(failure).message).toContain('does not simulate "limiter"')
 
 		const orphaned = await driver.runNext().catch((error: unknown) => error)
 
-		expect((orphaned as Error).message).toContain('no consumer on queue "billing"')
+		expect(errorOf(orphaned).message).toContain('no consumer on queue "billing"')
 	})
 })

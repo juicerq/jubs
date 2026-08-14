@@ -106,6 +106,7 @@ export async function expressDashboard(options: DashboardOptions): Promise<Expre
 
 	await mountDashboard({ ...options, serverAdapter })
 
+	// oxlint-disable-next-line typescript/consistent-type-assertions
 	return serverAdapter.getRouter() as ExpressRouter
 }
 
@@ -120,5 +121,6 @@ export async function fastifyDashboard(options: DashboardOptions): Promise<Fasti
 
 	await mountDashboard({ ...options, serverAdapter })
 
+	// oxlint-disable-next-line typescript/consistent-type-assertions
 	return serverAdapter.registerPlugin() as unknown as FastifyPlugin
 }

@@ -16,6 +16,7 @@ export interface Slot {
 	readonly many: boolean
 }
 
+// oxlint-disable-next-line juicerq/no-trivial-call-wrapper
 function holdsMany(
 	declared: AnyDefinition | readonly [AnyDefinition],
 ): declared is readonly [AnyDefinition] {
@@ -121,7 +122,7 @@ function arrivedIn(state: FlowState, slot: string): number {
  * nothing is stored as the string `"null"` and reads back as `null`, so a slot
  * full of void children is indistinguishable from an empty one by value.
  */
-export function childrenShort(
+function childrenShort(
 	definition: JobDefinition,
 	declared: Envelope["slots"],
 	state: FlowState,
@@ -335,7 +336,13 @@ function composeSlot(slot: Slot, awaits: Record<string, unknown>): Promise<FlowC
 		return [composeChild(slot, given)]
 	}
 
-	return (given as readonly unknown[]).map((one) => composeChild(slot, one))
+	if (!Array.isArray(given)) {
+		throw new Error(
+			`jubs: the slot "${slot.name}", which waits on many of "${slot.definition.name}", was given what is not the array its enqueue proved`,
+		)
+	}
+
+	return given.map((one) => composeChild(slot, one))
 }
 
 /**

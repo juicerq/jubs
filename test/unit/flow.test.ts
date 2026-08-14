@@ -15,6 +15,7 @@ import { composeChildId, readChildSlot } from "@/JobId"
 import { ResultError } from "@/Result"
 import { memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const fetchXmls = defineJob({
@@ -60,6 +61,14 @@ const leafNode: FlowChildNode = {
 	envelope: { v: 1, name: "nfe.sign-row", data: { row: 7 }, origin: "flow" },
 	delivery: DELIVERY_DEFAULTS,
 	children: [],
+}
+
+function childDeadFrom(error: unknown): ChildDeadError {
+	if (error instanceof ChildDeadError) {
+		return error
+	}
+
+	throw new Error(`the read gave back ${String(error)} instead of a ChildDeadError`)
 }
 
 describe("enqueuing a definition that waits on children", () => {
@@ -176,24 +185,28 @@ describe("enqueuing a definition that waits on children", () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
 
+		const page: number = JSON.parse('"one"')
+
 		const failure = await jobs
 			.enqueue(
 				zipExport,
 				{ run_id: "r-1" },
 				{
-					xmls: [{ page: "one" as unknown as number }],
+					xmls: [{ page }],
 					manifest: { data: { run_id: "r-1" }, awaits: { row: { row: 7 } } },
 				},
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("nfe.fetch-xmls")
+		expect(errorOf(failure).message).toContain("nfe.fetch-xmls")
 		expect(driver.flows).toEqual([])
 	})
 
 	test("refuses a grandchild payload its schema rejects, and enqueues nothing at all", async () => {
 		const driver = recordingDriver()
 		const jobs = createJobs({ driver })
+
+		const row: number = JSON.parse('"seven"')
 
 		const failure = await jobs
 			.enqueue(
@@ -203,13 +216,13 @@ describe("enqueuing a definition that waits on children", () => {
 					xmls: [{ page: 1 }],
 					manifest: {
 						data: { run_id: "r-1" },
-						awaits: { row: { row: "seven" as unknown as number } },
+						awaits: { row: { row } },
 					},
 				},
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("nfe.sign-row")
+		expect(errorOf(failure).message).toContain("nfe.sign-row")
 		expect(driver.flows).toEqual([])
 	})
 
@@ -343,8 +356,8 @@ describe("what an enqueue refuses that defineJob cannot see", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("nfe.reconcile")
-		expect((failure as Error).message).toContain("uniqueness does not apply inside a flow")
+		expect(errorOf(failure).message).toContain("nfe.reconcile")
+		expect(errorOf(failure).message).toContain("uniqueness does not apply inside a flow")
 		expect(driver.flows).toEqual([])
 	})
 
@@ -364,8 +377,8 @@ describe("what an enqueue refuses that defineJob cannot see", () => {
 			.enqueue(uniqueLater, { run_id: "r-1" }, { xmls: [{ page: 1 }] })
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("nfe.unique-later")
-		expect((failure as Error).message).toContain("uniqueness does not apply inside a flow")
+		expect(errorOf(failure).message).toContain("nfe.unique-later")
+		expect(errorOf(failure).message).toContain("uniqueness does not apply inside a flow")
 		expect(driver.flows).toEqual([])
 	})
 })
@@ -384,8 +397,8 @@ describe("the slots an enqueue has to fill", () => {
 
 		const failure = await jobs.enqueue(widened, { run_id: "r-1" }).catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain('the slots "xmls", "manifest"')
-		expect((failure as Error).message).toContain("passed nothing for them")
+		expect(errorOf(failure).message).toContain('the slots "xmls", "manifest"')
+		expect(errorOf(failure).message).toContain("passed nothing for them")
 		expect(driver.flows).toEqual([])
 	})
 
@@ -397,7 +410,7 @@ describe("the slots an enqueue has to fill", () => {
 			.enqueue(widened, { run_id: "r-1" }, { xmls: [{ page: 1 }] })
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain('passed nothing for "manifest"')
+		expect(errorOf(failure).message).toContain('passed nothing for "manifest"')
 		expect(driver.flows).toEqual([])
 	})
 
@@ -413,7 +426,7 @@ describe("the slots an enqueue has to fill", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain(
+		expect(errorOf(failure).message).toContain(
 			'waits on many of "nfe.fetch-xmls" in the slot "xmls", and this enqueue passed one value',
 		)
 		expect(driver.flows).toEqual([])
@@ -427,7 +440,7 @@ describe("the slots an enqueue has to fill", () => {
 			.enqueue(widened, { run_id: "r-1" }, { xmls: [{ page: 1 }], manifest: [] })
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain(
+		expect(errorOf(failure).message).toContain(
 			'waits on exactly one "nfe.manifest" in the slot "manifest", and this enqueue passed an array',
 		)
 		expect(driver.flows).toEqual([])
@@ -520,7 +533,7 @@ describe("childrenFor", () => {
 		}).catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(ChildrenPendingError)
-		expect((failure as Error).message).toContain("1 of them has not finished yet")
+		expect(errorOf(failure).message).toContain("1 of them has not finished yet")
 	})
 
 	test("refuses the read when a child failed every attempt, carrying what the others returned", async () => {
@@ -540,9 +553,10 @@ describe("childrenFor", () => {
 			id: "1",
 		}).catch((error: unknown) => error)
 
-		expect(failure).toBeInstanceOf(ChildDeadError)
-		expect((failure as Error).message).toContain('"xmls", which runs "nfe.fetch-xmls"')
-		expect((failure as ChildDeadError).results).toEqual([manifestResult])
+		const dead = childDeadFrom(failure)
+
+		expect(dead.message).toContain('"xmls", which runs "nfe.fetch-xmls"')
+		expect(dead.results).toEqual([manifestResult])
 	})
 
 	test("refuses the read when a slot holds fewer children than it was enqueued with", async () => {
@@ -559,7 +573,7 @@ describe("childrenFor", () => {
 		}).catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(ChildrenShortError)
-		expect((failure as Error).message).toContain('"xmls" was given 2 and 0 arrived')
+		expect(errorOf(failure).message).toContain('"xmls" was given 2 and 0 arrived')
 	})
 
 	test("refuses a child value the result schema of its definition rejects", async () => {
@@ -580,7 +594,7 @@ describe("childrenFor", () => {
 		}).catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(ResultError)
-		expect((failure as Error).message).toContain("nfe.fetch-xmls")
+		expect(errorOf(failure).message).toContain("nfe.fetch-xmls")
 	})
 })
 
@@ -729,7 +743,7 @@ describe("context.children", () => {
 			.catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain("nfe.fetch-xmls")
+		expect(errorOf(failure).message).toContain("nfe.fetch-xmls")
 		expect(ran).toBe(false)
 	})
 
@@ -757,7 +771,7 @@ describe("context.children", () => {
 
 		expect(driver.flowReads).toEqual([{ queue: "nfe", id: "1" }])
 		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain(
+		expect(errorOf(failure).message).toContain(
 			"carries no record of how many children they were given",
 		)
 		expect(ran).toBe(false)
@@ -841,8 +855,8 @@ describe("a child still in flight when the parent is delivered", () => {
 
 		expect(ran).toBe(0)
 		expect(failure).toBeInstanceOf(ChildrenPendingError)
-		expect((failure as Error).message).toContain("1 of them has not finished yet")
-		expect((failure as Error).message).toContain("spending no attempt")
+		expect(errorOf(failure).message).toContain("1 of them has not finished yet")
+		expect(errorOf(failure).message).toContain("spending no attempt")
 		expect(reported).toEqual([])
 		expect(buried).toEqual([])
 	})
@@ -888,7 +902,7 @@ describe("a child still in flight when the parent is delivered", () => {
 
 		expect(ran).toBe(0)
 		expect(failure).toBeInstanceOf(ChildrenPendingError)
-		expect((failure as Error).message).toContain("spending no attempt")
+		expect(errorOf(failure).message).toContain("spending no attempt")
 		expect(buried).toEqual([])
 		expect(reported).toEqual([])
 	})
@@ -957,9 +971,9 @@ describe("dead.replay of a flow job", () => {
 		const buried = await jobs.dead.list("nfe")
 		const failure = await jobs.dead.replay(buried[0]?.id ?? "").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("nfe:1")
-		expect((failure as Error).message).toContain("jobs.retry")
-		expect((failure as Error).message).toContain("jobs.dead.discard")
+		expect(errorOf(failure).message).toContain("nfe:1")
+		expect(errorOf(failure).message).toContain("jobs.retry")
+		expect(errorOf(failure).message).toContain("jobs.dead.discard")
 		expect(await jobs.dead.list("nfe")).toHaveLength(1)
 	})
 })
@@ -980,8 +994,8 @@ describe("memoryDriver", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("memoryDriver does not simulate")
-		expect((failure as Error).message).toContain("waits on children")
+		expect(errorOf(failure).message).toContain("memoryDriver does not simulate")
+		expect(errorOf(failure).message).toContain("waits on children")
 	})
 
 	test("refuses to say what the children of a job it delivers settled into", async () => {
@@ -1001,8 +1015,8 @@ describe("memoryDriver", () => {
 
 		const failure = await driver.drain().catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("memoryDriver does not simulate")
-		expect((failure as Error).message).toContain("children of a job that waits on children")
+		expect(errorOf(failure).message).toContain("memoryDriver does not simulate")
+		expect(errorOf(failure).message).toContain("children of a job that waits on children")
 		expect(ran).toBe(false)
 	})
 })

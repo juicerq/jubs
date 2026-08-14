@@ -35,6 +35,7 @@ import { type Envelope, readEnvelope } from "@/Envelope"
 import { ChildrenPendingError } from "@/Flow"
 import {
 	type ForgetOutcome,
+	heldRetryDelayMs,
 	type IdempotencyLease,
 	type IdempotencyStore,
 	type KeptResult,
@@ -174,20 +175,20 @@ const BLOCKING_CONNECTION_FIX =
 
 interface ConnectionShape {
 	readonly isCluster?: boolean
+	readonly maxRetriesPerRequest?: unknown
+	readonly redisOptions?: { readonly maxRetriesPerRequest?: unknown }
 	readonly options?: {
 		readonly maxRetriesPerRequest?: unknown
 		readonly redisOptions?: { readonly maxRetriesPerRequest?: unknown }
 	}
 }
 
-function blockingOptions(connection: ConnectionOptions) {
-	const client = connection as ConnectionShape
-
-	if (client.isCluster) {
-		return client.options?.redisOptions
+function blockingOptions(connection: ConnectionShape) {
+	if (connection.isCluster) {
+		return connection.options?.redisOptions ?? connection.redisOptions
 	}
 
-	return client.options
+	return connection.options ?? connection.redisOptions ?? connection
 }
 
 export function assertBlockingConnection(connection: ConnectionOptions): void {
@@ -350,8 +351,6 @@ function storedEnvelope(stored: unknown): Envelope | undefined {
 	}
 }
 
-export const HELD_RETRY_MS = 1_000
-
 /**
  * Whether Redis refused to remove a job because a worker holds its lock.
  *
@@ -418,17 +417,19 @@ function scriptClient(connection: ConnectionOptions): () => Promise<RedisClient>
 }
 
 export function readLease(reply: unknown, token: string): IdempotencyLease {
-	const [current, ttl] = Array.isArray(reply) ? reply : []
+	const [current] = Array.isArray(reply) ? reply : []
 
 	if (typeof current !== "string") {
 		return { state: "acquired", token }
 	}
 
 	if (current.startsWith(RUNNING_PREFIX)) {
-		return { state: "held", retryInMs: typeof ttl === "number" && ttl > 0 ? ttl : HELD_RETRY_MS }
+		return { state: "held" }
 	}
 
-	return { state: "complete", kept: JSON.parse(current) as KeptResult }
+	const kept: KeptResult = JSON.parse(current)
+
+	return { state: "complete", kept }
 }
 
 /**
@@ -479,11 +480,9 @@ function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore 
 		async acquire({ key, leaseMs }) {
 			const token = randomUUID()
 
-			const reply = await (await client()).runCommand(ACQUIRE_COMMAND, [
-				redisKey(key),
-				heldBy(token),
-				leaseMs,
-			])
+			const reply = await (
+				await client()
+			).runCommand(ACQUIRE_COMMAND, [redisKey(key), heldBy(token), leaseMs])
 
 			return readLease(reply, token)
 		},
@@ -493,7 +492,9 @@ function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore 
 		},
 
 		async complete({ key, token, kept, retainForMs }) {
-			await (await client()).runCommand(COMPLETE_COMMAND, [
+			await (
+				await client()
+			).runCommand(COMPLETE_COMMAND, [
 				redisKey(key),
 				heldBy(token),
 				JSON.stringify(kept),
@@ -506,10 +507,9 @@ function redisIdempotency(client: () => Promise<RedisClient>): IdempotencyStore 
 		},
 
 		async forget(key) {
-			const reply: unknown = await (await client()).runCommand(FORGET_COMMAND, [
-				redisKey(key),
-				RUNNING_PREFIX,
-			])
+			const reply: unknown = await (
+				await client()
+			).runCommand(FORGET_COMMAND, [redisKey(key), RUNNING_PREFIX])
 
 			return readForgotten(reply)
 		},
@@ -592,11 +592,11 @@ async function requestCancel(
 	queue: string,
 	delivery: RunningDelivery,
 ): Promise<void> {
-	await (await client()).set(
-		`${cancelPrefix(queue)}${delivery.id}`,
-		String(delivery.attemptsStarted),
-		{ PX: CANCEL_MARK_TTL_MS },
-	)
+	await (
+		await client()
+	).set(`${cancelPrefix(queue)}${delivery.id}`, String(delivery.attemptsStarted), {
+		PX: CANCEL_MARK_TTL_MS,
+	})
 }
 
 function toWorkerOptions(request: ConsumeRequest, connection: ConnectionOptions): WorkerOptions {
@@ -624,7 +624,10 @@ async function reschedule(
 		)
 	}
 
-	await job.moveToDelayed(Date.now() + postponed.delayMs, token)
+	const delayMs =
+		postponed instanceof LeaseHeldError ? heldRetryDelayMs(job.attemptsStarted) : postponed.delayMs
+
+	await job.moveToDelayed(Date.now() + delayMs, token)
 
 	throw new DelayedError(postponed.message)
 }
@@ -737,7 +740,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			const job = await queueFor(queue).getJob(id)
 
 			if (!job) {
-				return undefined
+				return
 			}
 
 			const state = await job.getState()
@@ -808,7 +811,9 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 				return []
 			}
 
-			const taken: unknown = await (await client()).runCommand(TAKE_CANCELLED_COMMAND, [
+			const taken: unknown = await (
+				await client()
+			).runCommand(TAKE_CANCELLED_COMMAND, [
 				cancelPrefix(queue),
 				...running.flatMap((delivery) => [delivery.id, String(delivery.attemptsStarted)]),
 			])
@@ -820,7 +825,11 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			return taken.flatMap((position) => {
 				const delivery = running[Number(position) - 1]
 
-				return delivery ? [delivery] : []
+				if (!delivery) {
+					return []
+				}
+
+				return [delivery]
 			})
 		},
 
@@ -871,9 +880,9 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 			},
 
 			async read(queue, id) {
-				const reply: unknown = await (await client()).runCommand(READ_FLOW_COMMAND, [
-					queueFor(queue).toKey(id),
-				])
+				const reply: unknown = await (
+					await client()
+				).runCommand(READ_FLOW_COMMAND, [queueFor(queue).toKey(id)])
 
 				return readFlowState(reply)
 			},
@@ -910,7 +919,7 @@ export function redisDriver(connection: ConnectionOptions): JobDriver {
 				const job = await queueFor(deadQueueName(queue)).getJob(id)
 
 				if (!job) {
-					return undefined
+					return
 				}
 
 				return readDeadEntry(job.data)

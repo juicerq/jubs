@@ -4,11 +4,11 @@
 
 `unique` decides which of several jobs sharing a key survives. `key` reads the **validated** payload and returns that key, so one definition can be unique per user, per entity or per account. Redis decides it atomically at the moment of the enqueue, so two processes racing on the same key still leave one winner.
 
-| Mode | Which job wins |
-| --- | --- |
-| `keepFirst` | the first enqueued; every later one is dropped |
-| `keepLast` | the last enqueued inside the window; it replaces the one waiting |
-| `noOverlap` | the running one, and the latest of those enqueued while it runs |
+| Mode        | Which job wins                                                   |
+| ----------- | ---------------------------------------------------------------- |
+| `keepFirst` | the first enqueued; every later one is dropped                   |
+| `keepLast`  | the last enqueued inside the window; it replaces the one waiting |
+| `noOverlap` | the running one, and the latest of those enqueued while it runs  |
 
 Use `keepFirst` for work that must happen once. A welcome email per user: the signup flow fires twice, the second enqueue is dropped, and the user is welcomed once.
 
@@ -74,15 +74,17 @@ Two deliveries of that job for the same `orderId` capture the card once. The sec
 
 A key is in one of three states, and the state decides what the delivery does.
 
-| State | What the delivery does |
-| --- | --- |
-| absent | takes the key and runs the handler |
-| held by a running delivery, under a lease that expires | is rescheduled, and arrives again later |
-| complete, with a kept record | skips the handler and gives back the kept result |
+| State                                                  | What the delivery does                           |
+| ------------------------------------------------------ | ------------------------------------------------ |
+| absent                                                 | takes the key and runs the handler               |
+| held by a running delivery, under a lease that expires | is rescheduled, and arrives again later          |
+| complete, with a kept record                           | skips the handler and gives back the kept result |
 
 **A rescheduled delivery consumes no attempt.** It is moved back to the queue with a delay and delivered again; the attempt counter does not move, `onAttemptFailed` and `onDead` do not fire, and nothing is buried. There is no ceiling on it either — a delivery that keeps meeting a held key keeps being rescheduled, for as long as the key stays held. The lease is what ends that wait: when it expires, the next delivery takes the key and runs.
 
-Three values are fixed today and configurable by nothing: the lease is **30 seconds**, it is renewed every **10 seconds** while the handler runs, and a complete key keeps its result for **24 hours**. Renewal is why a handler slower than 30 seconds is safe — the lease follows it for as long as it runs.
+The wait follows a doubling cadence: **100 ms** on the first wait, then 200, 400, 800, and the **1 second** ceiling from the fifth on. What counts the steps is not the attempt counter, which stays still — it is the number of times Redis has handed this job to a worker, which climbs once per reschedule and never resets while the delivery lives. The cadence starts short on purpose — a duplicate delivered behind a job that finishes in milliseconds settles in milliseconds too, instead of waiting out the lease.
+
+Four values are fixed today and configurable by nothing: the lease is **30 seconds**, it is renewed every **10 seconds** while the handler runs, a complete key keeps its result for **24 hours**, and a rescheduled delivery waits the doubling cadence above, from a **100 ms** floor to a **1 second** ceiling. Renewal is why a handler slower than 30 seconds is safe — the lease follows it for as long as it runs.
 
 A kept result is stored as JSON, so a repeated delivery gets the JSON projection of it: a `Date` comes back a string, and anything JSON drops is dropped.
 
@@ -90,7 +92,7 @@ It also has a size limit of **64 KB**. Above it, jubs keeps the completion marke
 
 A result JSON cannot serialise at all — a circular object, a `BigInt` — leaves a state jubs cannot repair. jubs keeps the completion marker alone, as above, and reports the job a success: `onSuccess` fires. BullMQ then throws while writing the return value, outside jubs' reach and after the dispatch has returned, so the attempt is failed from under it. The delivery arrives again, meets the complete key, skips the handler and replays the empty marker — which serialises — so the job settles `completed` while still carrying the `failedReason` of the attempt that threw. `onAttemptFailed` and `onDead` never fire, and nothing is buried. On a definition with no key the handler runs again on every attempt and the job ends `failed`. Nothing warns you either way, so return a value JSON can hold.
 
-The lease is what makes this correct, and the reason is worth spelling out. Marking the key before running and skipping it on the repeat would be at-most-once, not idempotent: a worker killed between the mark and the end would leave a key that says done over work that never happened, and every later delivery would report success for a charge nobody made. The lease says *in progress*, not *done*, and it expires — so a killed worker gives the job back instead of losing it.
+The lease is what makes this correct, and the reason is worth spelling out. Marking the key before running and skipping it on the repeat would be at-most-once, not idempotent: a worker killed between the mark and the end would leave a key that says done over work that never happened, and every later delivery would report success for a charge nobody made. The lease says _in progress_, not _done_, and it expires — so a killed worker gives the job back instead of losing it.
 
 **A handler that throws releases the lease.** It is not held for the rest of its 30 seconds: the retry BullMQ schedules finds the key absent and runs. A failed job retries at its own pace, as it would with no key at all.
 
@@ -133,4 +135,3 @@ type ForgetResult =
 **A replay meeting a held key is refused.** Right after a `timeoutMs` burial that is the ordinary state, not a rare one: the body that outlived the attempt still holds the key, and jubs keeps renewing its lease for as long as that body lives, so the lease does not expire under it. A replay enqueued over it would be rescheduled onto the held key, and the delivery after that would hand back the result the body kept — with the dead record already dropped, so nothing would be left to replay. `dead.replay` throws instead, before it enqueues anything, which is what leaves the dead record where it is. Ask again once the body has ended: the key is complete by then, forgetting it deletes a result, and the job runs. So a replay either runs the handler or refuses — it never comes back green over work nobody did.
 
 The memory driver keeps the absent and the complete states for real: a repeated delivery of a completed key skips the handler and gives back the kept result — as the JSON projection of it, the same one Redis gives back — and a failing handler releases the key. Forgetting a key is real here too, because it needs no clock either: a key a delivery holds is refused and stays where it is, and a complete key is deleted. It keeps no clock, so `leaseMs` and the retention are ignored and a lease never expires on its own. A delivery that meets a held lease has to be rescheduled, which needs a clock, so the memory driver throws instead. Test a held lease, an expired lease and a killed worker against `redisDriver`.
-

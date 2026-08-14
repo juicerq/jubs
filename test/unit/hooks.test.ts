@@ -43,6 +43,14 @@ function recordHooks(fired: string[], events: (JobEvent | JobFailureEvent)[]): J
 	}
 }
 
+function failureOf(event: JobEvent | JobFailureEvent | undefined): JobFailureEvent {
+	if (event && "error" in event) {
+		return event
+	}
+
+	throw new Error(`jubs: ${JSON.stringify(event)} is not a failure event, so it carries no error`)
+}
+
 describe("hooks", () => {
 	test("fires onStart then onSuccess, naming the job, its queue, id, attempt and origin", async () => {
 		const driver = recordingDriver()
@@ -92,7 +100,7 @@ describe("hooks", () => {
 
 		expect(fired).toEqual(["onStart", "onAttemptFailed"])
 
-		const failure = events.at(-1) as JobFailureEvent
+		const failure = failureOf(events.at(-1))
 
 		expect(failure.name).toBe("email.send")
 		expect(failure.attempt).toBe(2)
@@ -169,7 +177,7 @@ describe("hooks", () => {
 
 		expect(fired).toEqual(["onAttemptFailed", "onDead"])
 
-		const failure = events[0] as JobFailureEvent
+		const failure = failureOf(events[0])
 
 		expect(failure.name).toBe("email.retired")
 		expect(failure.origin).toBe("direct")

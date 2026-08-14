@@ -86,7 +86,7 @@ export type AwaitsInput<Definition> =
  * value for a slot declared as a bare definition, and an array for a slot
  * declared as an array.
  */
-export type Children<Awaits extends AwaitsMap> = {
+type Children<Awaits extends AwaitsMap> = {
 	readonly [Slot in keyof Awaits]: Awaits[Slot] extends readonly [infer Child]
 		? readonly ResultOf<Child>[]
 		: ResultOf<Awaits[Slot]>
@@ -167,7 +167,7 @@ export interface JobDefinition<
 	readonly migrations?: Readonly<Record<number, PayloadMigration>>
 	readonly delivery?: DeliveryPolicy
 	readonly schedule?: Schedule
-	readonly idempotencyKey?: (data: unknown) => string
+	idempotencyKey?(data: unknown): string
 	readonly timeoutMs?: number
 }
 
@@ -177,9 +177,9 @@ export interface JobDefinitionInput<
 	Result extends StandardSchemaV1 | undefined = StandardSchemaV1 | undefined,
 	Awaits extends AwaitsMap | undefined = AwaitsMap | undefined,
 > extends Omit<
-		JobDefinition<Payload, Queue, Result, Awaits>,
-		"delivery" | "schedule" | "idempotencyKey"
-	> {
+	JobDefinition<Payload, Queue, Result, Awaits>,
+	"delivery" | "schedule" | "idempotencyKey"
+> {
 	readonly delivery?: DeliveryPolicy<StandardSchemaV1.InferOutput<Payload>>
 	readonly schedule?: Schedule<StandardSchemaV1.InferInput<Payload>>
 	readonly idempotencyKey?: (data: StandardSchemaV1.InferOutput<Payload>) => string
@@ -191,7 +191,7 @@ export function payloadVersion(definition: JobDefinition): number {
 
 export interface JobHandler<Queue extends string = string> {
 	readonly definition: JobDefinition<StandardSchemaV1, Queue>
-	readonly run: (data: unknown, context: HandlerContext) => Promise<unknown>
+	run(data: unknown, context: HandlerContext): Promise<unknown>
 }
 
 export type HandlerRun<
@@ -333,13 +333,14 @@ export function defineJob<
 	const timed = input.timeoutMs ? { ...scheduled, timeoutMs: input.timeoutMs } : scheduled
 
 	const definition = input.idempotencyKey
-		? { ...timed, idempotencyKey: input.idempotencyKey as (data: unknown) => string }
+		? { ...timed, idempotencyKey: input.idempotencyKey }
 		: timed
 
 	if (!input.delivery) {
 		return definition
 	}
 
+	// oxlint-disable-next-line typescript/consistent-type-assertions
 	return { ...definition, delivery: input.delivery as DeliveryPolicy }
 }
 
@@ -352,5 +353,5 @@ export function defineHandler<
 	definition: JobDefinition<Payload, Queue, Result, Awaits>,
 	run: HandlerRun<Payload, Result, Awaits>,
 ): JobHandler<Queue> {
-	return { definition, run: run as JobHandler["run"] }
+	return { definition, run }
 }

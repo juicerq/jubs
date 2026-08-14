@@ -56,11 +56,11 @@ const enqueued = await jobs.enqueue(
 
 The two `fetchRows` jobs and `readBudget` run first, on `analytics`. `buildReport` runs when all three are done, `mailReport` when `buildReport` is done. `enqueue` gives back the id of the **root** — the job the producer holds — in the same form an ordinary enqueue gives back. The whole tree is added in one step and validated before anything reaches Redis, so a node a rule refuses stops the flow with nothing enqueued.
 
-**The shape of a slot declares how many children it holds.** `rows: [fetchRows]` waits on many `fetchRows`; `budget: readBudget` waits on exactly one. The array holds one definition and means *many of these* — it is not a list of different jobs. Two definitions in one slot do not typecheck, and the error TypeScript gives for `[a, b]` is `not assignable to type 'undefined'`, which says nothing useful; the rule is one definition per slot, a slot per job you wait on.
+**The shape of a slot declares how many children it holds.** `rows: [fetchRows]` waits on many `fetchRows`; `budget: readBudget` waits on exactly one. The array holds one definition and means _many of these_ — it is not a list of different jobs. Two definitions in one slot do not typecheck, and the error TypeScript gives for `[a, b]` is `not assignable to type 'undefined'`, which says nothing useful; the rule is one definition per slot, a slot per job you wait on.
 
 The arity carries through: a slot declared as an array is filled with an array and read back as an array, and a slot declared bare is filled with one value and read back as one value.
 
-**A slot is filled with a payload — unless the job in it waits on children of its own.** Then it is filled with `{ data, awaits }`: `data` is that job's payload, `awaits` is what fills *its* slots. That is the whole of nesting, and it repeats to any depth. In the example above, `report` takes the wrapper because `buildReport` declares `awaits`, while `rows` and `budget` take plain payloads because `fetchRows` and `readBudget` wait on nothing.
+**A slot is filled with a payload — unless the job in it waits on children of its own.** Then it is filled with `{ data, awaits }`: `data` is that job's payload, `awaits` is what fills _its_ slots. That is the whole of nesting, and it repeats to any depth. In the example above, `report` takes the wrapper because `buildReport` declares `awaits`, while `rows` and `budget` take plain payloads because `fetchRows` and `readBudget` wait on nothing.
 
 `context.children` is how a parent reads what its children returned.
 
@@ -78,7 +78,7 @@ It is a plain object, not a call: one entry per slot, typed from `awaits`. Here 
 
 The read is decided by the definition, never by what enqueued the job. A definition that declares `awaits` has its children read on every delivery — one enqueued by hand, one left in Redis by an older deploy, one a schedule produced. There is no path where a job that waits on children reaches its handler over slots nobody filled.
 
-**A flow is for fan-in.** Use it when one job needs the results of several. A job that merely *follows* another is not a flow: enqueue it at the end of the first job's handler. That way a failure retries the second job alone, where a flow would keep the first job's whole subtree in Redis to say the same thing.
+**A flow is for fan-in.** Use it when one job needs the results of several. A job that merely _follows_ another is not a flow: enqueue it at the end of the first job's handler. That way a failure retries the second job alone, where a flow would keep the first job's whole subtree in Redis to say the same thing.
 
 ```ts
 export const chargeCardHandler = defineHandler(chargeCard, async (data) => {
@@ -189,4 +189,3 @@ await jobs.enqueue(mailReport, { to: "finance@example.com" }, input)
 ```
 
 **`{ data, awaits }` is the least guessable rule in this API.** Whether a slot takes a payload or that wrapper depends on the job in it, not on the slot, so the same slot changes shape the day its definition starts waiting on something. Get it wrong and the compiler complains that a field of your payload does not exist on `{ data, awaits }` — true, and no help at all in finding the rule. At run time it is worse: a value in neither shape reads as nothing at all, so what you see is that child's own payload refusal, or the refusal of the slots it was never given. If a slot's error talks about a payload you did think you passed, the wrapper is what is missing.
-

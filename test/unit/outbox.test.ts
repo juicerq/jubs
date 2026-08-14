@@ -11,7 +11,10 @@ import {
 	VersionAheadError,
 } from "@/index"
 import { memoryDriver } from "@/testing/index"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
+
+const storedContact = type({ mail: "string" })
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -60,7 +63,7 @@ const currentContact = defineJob({
 	queue: "crm",
 	payload: type({ email: "string" }),
 	version: 2,
-	migrations: { 1: (data) => ({ email: (data as { mail: string }).mail }) },
+	migrations: { 1: (data) => ({ email: storedContact.assert(data).mail }) },
 })
 
 interface OutboxRow {
@@ -219,7 +222,7 @@ describe("an atomic block given a transaction", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe("the order was refused")
+		expect(errorOf(failure).message).toBe("the order was refused")
 		expect(outbox.rows).toEqual([])
 		expect(outbox.transactions).toEqual([])
 	})
@@ -238,8 +241,8 @@ describe("an atomic block given a transaction", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("invoice.mail")
-		expect((failure as Error).message).toContain("outbox")
+		expect(errorOf(failure).message).toContain("invoice.mail")
+		expect(errorOf(failure).message).toContain("outbox")
 		expect(outbox.rows).toEqual([])
 		expect(driver.flows).toEqual([])
 	})
@@ -258,8 +261,8 @@ describe("an atomic block given a transaction", () => {
 			)
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain(chargeOnce.name)
-		expect((failure as Error).message).toContain("unique")
+		expect(errorOf(failure).message).toContain(chargeOnce.name)
+		expect(errorOf(failure).message).toContain("unique")
 		expect(outbox.rows).toEqual([])
 		expect(driver.enqueued).toEqual([])
 	})
@@ -576,12 +579,14 @@ describe("the relay", () => {
 
 		await jobs.startRelay().close()
 
-		const failure = reported.mock.calls[0]?.[0] as Error | undefined
+		const reportedFailure = reported.mock.calls[0]?.[0]
 
 		reported.mockRestore()
 
-		expect(failure?.cause).toBeInstanceOf(VersionAheadError)
-		expect(failure?.message).toContain('the outbox row "1"')
+		const failure = errorOf(reportedFailure)
+
+		expect(failure.cause).toBeInstanceOf(VersionAheadError)
+		expect(failure.message).toContain('the outbox row "1"')
 		expect(driver.enqueued(oldContact)).toEqual([])
 		expect(outbox.rows[0]?.delivered).toBe(false)
 	})
@@ -659,17 +664,18 @@ describe("the relay", () => {
 
 		await jobs.startRelay().close()
 
-		const failure = reported.mock.calls[0]?.[0] as Error | undefined
-		const cause = failure?.cause as Error | undefined
+		const reportedFailure = reported.mock.calls[0]?.[0]
 
 		reported.mockRestore()
 
-		expect(failure?.message).toContain('the outbox row "1"')
-		expect(failure?.message).toContain("its job is not lost")
-		expect(failure?.message).toContain("leave the row in the claim")
-		expect(failure?.message).toContain("ECONNREFUSED 127.0.0.1:6379")
-		expect(failure?.message).not.toContain("mark it delivered by hand, or delete it")
-		expect(cause?.message).toContain("ECONNREFUSED 127.0.0.1:6379")
+		const failure = errorOf(reportedFailure)
+
+		expect(failure.message).toContain('the outbox row "1"')
+		expect(failure.message).toContain("its job is not lost")
+		expect(failure.message).toContain("leave the row in the claim")
+		expect(failure.message).toContain("ECONNREFUSED 127.0.0.1:6379")
+		expect(failure.message).not.toContain("mark it delivered by hand, or delete it")
+		expect(errorOf(failure.cause).message).toContain("ECONNREFUSED 127.0.0.1:6379")
 		expect(outbox.rows[0]?.delivered).toBe(false)
 	})
 

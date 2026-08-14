@@ -4,7 +4,7 @@ import { join } from "node:path"
 import { type } from "arktype"
 import { Queue } from "bullmq"
 import IORedis from "ioredis"
-import { IDEMPOTENCY_MAX_RESULT_BYTES } from "@/Idempotency"
+import { HELD_RETRY_FLOOR_MS, HELD_RETRY_MS, IDEMPOTENCY_MAX_RESULT_BYTES } from "@/Idempotency"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
 import { waitFor } from "../support/Wait"
@@ -75,6 +75,31 @@ await jobs.start([
 
 async function counter(key: string): Promise<number> {
 	return Number((await inspectorConnection.get(key)) ?? 0)
+}
+
+const DELAYED_SCORE_PER_MS = 0x1000
+
+async function requestedDelaysOf(queue: string, jobId: string, samples: number): Promise<number[]> {
+	const delayedKey = `bull:${queue}:delayed`
+	const requested: number[] = []
+	let scheduledFor = 0
+
+	await waitFor(async () => {
+		const score = await inspectorConnection.zscore(delayedKey, jobId)
+
+		if (score) {
+			const wakeAt = Math.floor(Number(score) / DELAYED_SCORE_PER_MS)
+
+			if (wakeAt !== scheduledFor) {
+				scheduledFor = wakeAt
+				requested.push(wakeAt - Date.now())
+			}
+		}
+
+		return requested.length >= samples
+	})
+
+	return requested
 }
 
 afterAll(async () => {
@@ -182,6 +207,107 @@ describe("idempotency over redis", () => {
 
 		await runtime.close()
 	})
+
+	test("a duplicate delivered behind a running job settles on the retry cadence, not the lease", async () => {
+		const chargeCard = defineJob({
+			name: scoped("billing.dupe"),
+			queue: scoped("jubs.test.idem.dupe"),
+			payload: type({ orderId: "string" }),
+			idempotencyKey: (data) => data.orderId,
+		})
+
+		const queue = inspect(chargeCard.queue)
+		await scrub(queue)
+		await inspectorConnection.del(leaseKey(chargeCard.name, "dup-1"))
+
+		const jobs = createJobs({ driver: redisDriver(workerConnection) })
+		const ran: string[] = []
+		const holding = Promise.withResolvers<void>()
+
+		const runtime = await jobs.start(
+			[
+				defineHandler(chargeCard, async (data) => {
+					ran.push(data.orderId)
+
+					await holding.promise
+
+					return { receipt: "receipt-dup-1" }
+				}),
+			],
+			{ queues: { [chargeCard.queue]: { concurrency: 2 } } },
+		)
+
+		const first = await jobs.enqueue(chargeCard, { orderId: "dup-1" })
+		await waitFor(() => ran.length === 1)
+
+		const second = await jobs.enqueue(chargeCard, { orderId: "dup-1" })
+		const enqueuedBehind = Date.now()
+
+		await Bun.sleep(250)
+		holding.resolve()
+
+		await waitFor(
+			async () => (await (await queue.getJob(storedId(second)))?.getState()) === "completed",
+		)
+
+		const kept = await queue.getJob(storedId(second))
+
+		expect(ran).toEqual(["dup-1"])
+		expect(kept?.returnvalue).toEqual({ receipt: "receipt-dup-1" })
+		expect(Date.now() - enqueuedBehind).toBeLessThan(2_500)
+
+		await waitFor(async () => !!(await queue.getJob(storedId(first)))?.finishedOn)
+
+		await runtime.close()
+	}, 20_000)
+
+	test("a duplicate held behind a running job climbs from the floor to the ceiling", async () => {
+		const settleOrder = defineJob({
+			name: scoped("billing.ladder"),
+			queue: scoped("jubs.test.idem.ladder"),
+			payload: type({ orderId: "string" }),
+			idempotencyKey: (data) => data.orderId,
+		})
+
+		const queue = inspect(settleOrder.queue)
+		await scrub(queue)
+		await inspectorConnection.del(leaseKey(settleOrder.name, "lad-1"))
+
+		const jobs = createJobs({ driver: redisDriver(workerConnection) })
+		const ran: string[] = []
+		const holding = Promise.withResolvers<void>()
+
+		const runtime = await jobs.start(
+			[
+				defineHandler(settleOrder, async (data) => {
+					ran.push(data.orderId)
+
+					await holding.promise
+				}),
+			],
+			{ queues: { [settleOrder.queue]: { concurrency: 2 } } },
+		)
+
+		const first = await jobs.enqueue(settleOrder, { orderId: "lad-1" })
+		await waitFor(() => ran.length === 1)
+
+		const second = await jobs.enqueue(settleOrder, { orderId: "lad-1" })
+		const climbing = await requestedDelaysOf(settleOrder.queue, storedId(second), 5)
+
+		expect(climbing.at(0)).toBeLessThan(HELD_RETRY_FLOOR_MS * 2.5)
+		expect(climbing.some((delayMs) => delayMs > HELD_RETRY_MS * 0.75)).toBe(true)
+
+		holding.resolve()
+
+		await waitFor(async () => !!(await queue.getJob(storedId(first)))?.finishedOn)
+		await waitFor(
+			async () => (await (await queue.getJob(storedId(second)))?.getState()) === "completed",
+		)
+
+		expect(ran).toEqual(["lad-1"])
+
+		await runtime.close()
+	}, 30_000)
 
 	test("a delivery whose lease expired runs the handler again", async () => {
 		const shipOrder = defineJob({

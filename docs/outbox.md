@@ -98,19 +98,22 @@ const jobs = createJobs({
 })
 
 await db.transaction().execute(async (tx) => {
-	await jobs.atomic(async () => {
-		const order = await createOrder(tx, cart)
+	await jobs.atomic(
+		async () => {
+			const order = await createOrder(tx, cart)
 
-		await jobs.enqueue(chargeCard, { orderId: order.id })
+			await jobs.enqueue(chargeCard, { orderId: order.id })
 
-		await reserveStock(tx, cart)
-	}, { tx })
+			await reserveStock(tx, cart)
+		},
+		{ tx },
+	)
 })
 ```
 
 The block enqueues nothing. It collects the envelopes, and when it resolves it hands them to `outbox.save(envelopes, tx)` — one call, inside your transaction. A block that throws saves nothing, and the transaction that would have rolled back rolls back the rows too.
 
-**The two scopes invert.** Without a `tx`, the block wraps the transaction, because it has to outlive the commit. With a `tx`, the block sits *inside* the transaction, because `save` writes on a transaction that is still open. Wrapping a transaction around a block that already holds a `tx` writes the rows and delivers nothing, forever.
+**The two scopes invert.** Without a `tx`, the block wraps the transaction, because it has to outlive the commit. With a `tx`, the block sits _inside_ the transaction, because `save` writes on a transaction that is still open. Wrapping a transaction around a block that already holds a `tx` writes the rows and delivers nothing, forever.
 
 **`tx` is opaque.** It travels from your `jobs.atomic` call to your `outbox.save` untouched. Whatever your database library calls a transaction is what arrives, and casting it back is the one cast the adapter makes.
 
@@ -154,7 +157,7 @@ The same rule sets what your row ids may be. **A row id carrying a colon is refu
 
 **`jobs.dead.replay(id)` is refused in any block,** with or without a `tx`.
 
-**A job that declares `unique` is refused,** and the enqueue throws. Uniqueness does not survive the outbox: BullMQ reads the derived id first and the deduplication key second, so a key already pointing at another job answers with *that* job's id — the row would be marked delivered by a job that is not its own, and the job the row stands for would never exist. Passing it through in silence is the one thing not on offer. Drop `unique` from the definition, or enqueue that job outside the block, where uniqueness works and the transaction does not cover it. A job that must not run **twice** wants [`idempotencyKey`](./uniqueness.md#idempotency) instead, which travels through the outbox untouched.
+**A job that declares `unique` is refused,** and the enqueue throws. Uniqueness does not survive the outbox: BullMQ reads the derived id first and the deduplication key second, so a key already pointing at another job answers with _that_ job's id — the row would be marked delivered by a job that is not its own, and the job the row stands for would never exist. Passing it through in silence is the one thing not on offer. Drop `unique` from the definition, or enqueue that job outside the block, where uniqueness works and the transaction does not cover it. A job that must not run **twice** wants [`idempotencyKey`](./uniqueness.md#idempotency) instead, which travels through the outbox untouched.
 
 **A row the relay cannot deliver is left behind, and the rows around it go on.** A job name no definition on that client answers to, or a payload its schema refuses, takes that row out of the cycle and nothing else: the rows before and after it are enqueued and marked, and only the bad one stays unmarked. The failure names the row, through `console.error`, once per cycle.
 
@@ -296,4 +299,3 @@ The column types are `pg`'s: a `jsonb` comes back parsed and goes in as a string
 `memoryDriver` honours a derived id the way Redis does: a second enqueue under an id it already keeps gives the kept job back, and stores nothing. A test can kill a relay between the delivery and the mark, run it again, and see one job.
 
 It is **more** faithful than Redis in one way, and that way is the ceiling above: it keeps every job it ever recorded, so it never loses an id to a retention sweep. Test the sweep against `redisDriver`.
-

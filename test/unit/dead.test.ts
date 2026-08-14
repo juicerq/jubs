@@ -13,6 +13,7 @@ import {
 } from "@/index"
 import { type MemoryDriver, memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
+import { errorOf } from "../support/Failures"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -162,8 +163,8 @@ describe("opting a queue into a dead queue", () => {
 			.start([defineHandler(swallowing, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("billing.dead")
-		expect((failure as Error).message).toContain("consumed by nobody")
+		expect(errorOf(failure).message).toContain("billing.dead")
+		expect(errorOf(failure).message).toContain("consumed by nobody")
 	})
 })
 
@@ -253,8 +254,8 @@ describe("inspecting and replaying a dead job", () => {
 
 		const failure = await jobs.dead.replay("billing.dead:7").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("billing.dead:7")
-		expect((failure as Error).message).toContain("replayed or discarded already")
+		expect(errorOf(failure).message).toContain("billing.dead:7")
+		expect(errorOf(failure).message).toContain("replayed or discarded already")
 	})
 
 	test("replay and discard refuse an id that names a live queue", async () => {
@@ -264,8 +265,8 @@ describe("inspecting and replaying a dead job", () => {
 		const discarded = await jobs.dead.discard("billing:1").catch((error: unknown) => error)
 
 		for (const failure of [replayed, discarded]) {
-			expect((failure as Error).message).toContain("is not a dead job id")
-			expect((failure as Error).message).toContain("jobs.dead.list(queue)")
+			expect(errorOf(failure).message).toContain("is not a dead job id")
+			expect(errorOf(failure).message).toContain("jobs.dead.list(queue)")
 		}
 	})
 
@@ -280,8 +281,8 @@ describe("inspecting and replaying a dead job", () => {
 		const [dead] = await jobs.dead.list("billing")
 		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("billing.charge")
-		expect((failure as Error).message).toContain("createJobs({ definitions })")
+		expect(errorOf(failure).message).toContain("billing.charge")
+		expect(errorOf(failure).message).toContain("createJobs({ definitions })")
 	})
 
 	test("replay refuses a job whose definition waits on children, whatever its envelope says", async () => {
@@ -313,9 +314,9 @@ describe("inspecting and replaying a dead job", () => {
 		const [dead] = await jobs.dead.list("documents")
 		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("nfe.manifest")
-		expect((failure as Error).message).toContain("children_short")
-		expect((failure as Error).message).toContain("jobs.enqueue(definition, data, awaits)")
+		expect(errorOf(failure).message).toContain("nfe.manifest")
+		expect(errorOf(failure).message).toContain("children_short")
+		expect(errorOf(failure).message).toContain("jobs.enqueue(definition, data, awaits)")
 		expect(await jobs.dead.list("documents")).toHaveLength(1)
 	})
 
@@ -379,8 +380,8 @@ describe("inspecting and replaying a dead job", () => {
 		const [dead] = await jobs.dead.list("billing")
 		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("held by a delivery running right now")
-		expect((failure as Error).message).toContain("This dead record stays where it is")
+		expect(errorOf(failure).message).toContain("held by a delivery running right now")
+		expect(errorOf(failure).message).toContain("This dead record stays where it is")
 		expect(await jobs.dead.list("billing")).toHaveLength(1)
 		expect(driver.enqueued(settlePayment)).toEqual([{ paymentId: "pay-1" }])
 	})
@@ -401,7 +402,7 @@ describe("inspecting and replaying a dead job", () => {
 
 		const failure = await jobs.dead.discard("billing.dead:1").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("billing.dead:1")
+		expect(errorOf(failure).message).toContain("billing.dead:1")
 	})
 })
 
@@ -504,7 +505,7 @@ function refusal(stored: unknown): string {
 	try {
 		readDeadEntry(stored)
 	} catch (error: unknown) {
-		return (error as Error).message
+		return errorOf(error).message
 	}
 
 	throw new Error(`readDeadEntry read ${JSON.stringify(stored)} instead of refusing it`)

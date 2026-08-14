@@ -47,8 +47,8 @@ export interface Outbox {
 	 *
 	 * Two relays claiming one row would enqueue it twice, so the claim locks what
 	 * it reads and skips what another relay holds — `FOR UPDATE SKIP LOCKED` over
-	 * Postgres, and its equivalent elsewhere. The README carries the whole Kysely
-	 * adapter.
+	 * Postgres, and its equivalent elsewhere. The outbox guide,
+	 * `docs/outbox.md`, carries the whole Kysely adapter.
 	 *
 	 * A row claimed and never marked is claimed again, which is the point rather
 	 * than a fault: the job is stored under an id derived from the row, so a
@@ -61,7 +61,7 @@ export interface Outbox {
 	 * and a relay killed mid-cycle holds every row of its batch. Those rows come
 	 * back only because the claim releases them. A claim that holds a row for good
 	 * hands it out once and never again — the job that row carries never runs, and
-	 * nothing says so. The adapter in the README leases a claim for a minute.
+	 * nothing says so. The adapter in the outbox guide leases a claim for a minute.
 	 */
 	claim(limit: number): Promise<readonly ClaimedEnvelope[]>
 	/**
@@ -252,9 +252,9 @@ async function deliver(
 
 const ADVICE: Record<LeftBehindReason, string> = {
 	driver_failed:
-		"that row is not broken and its job is not lost: the delivery failed inside the driver, so nothing of it reached the queue, and the next cycle claims the row again and delivers it as soon as the driver answers. Look at Redis and at the connection the driver holds, and leave the row in the claim: marking it delivered by hand or deleting it loses a job that was committed together with the state change beside it. An outbox that counts claims gives up on the row before the connection comes back — the adapter in the README stops claiming a row after ten — so read that count, and reset it once the driver answers again.",
+		"that row is not broken and its job is not lost: the delivery failed inside the driver, so nothing of it reached the queue, and the next cycle claims the row again and delivers it as soon as the driver answers. Look at Redis and at the connection the driver holds, and leave the row in the claim: marking it delivered by hand or deleting it loses a job that was committed together with the state change beside it. An outbox that counts claims gives up on the row before the connection comes back — the adapter in the outbox guide stops claiming a row after ten — so read that count, and reset it once the driver answers again.",
 	version_ahead:
-		"that row is not broken, and this process alone cannot deliver it: a newer deploy wrote its payload, and a process running that version delivers it as soon as it claims it. Wait for the deploy to finish, and leave the row in the claim: marking it delivered by hand or deleting it loses a job that was committed together with the state change beside it. An outbox that counts claims gives up on the row before the deploy does — the adapter in the README stops claiming a row after ten — so read that count, and reset it if the deploy takes long.",
+		"that row is not broken, and this process alone cannot deliver it: a newer deploy wrote its payload, and a process running that version delivers it as soon as it claims it. Wait for the deploy to finish, and leave the row in the claim: marking it delivered by hand or deleting it loses a job that was committed together with the state change beside it. An outbox that counts claims gives up on the row before the deploy does — the adapter in the outbox guide stops claiming a row after ten — so read that count, and reset it if the deploy takes long.",
 	unrecoverable:
 		"that row alone is not enqueued and stays unmarked, so every cycle claims it again and fails on it again until something outside the relay changes it. Register on the relaying client the definition the failure names, or take the row out of the claim: mark it delivered by hand, or delete it.",
 }

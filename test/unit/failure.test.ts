@@ -26,7 +26,7 @@ describe("serializeError", () => {
 
 	test("reports a value that is not an error as an Error with no stack", () => {
 		expect(serializeError("nope")).toEqual({ name: "Error", message: "nope" })
-		expect(serializeError(undefined)).toEqual({ name: "Error", message: "undefined" })
+		expect(serializeError(undefined)).toEqual({ name: "Error", message: "undefined" }) // oxlint-disable-line unicorn/no-useless-undefined
 	})
 
 	test("omits the cause key when the error carries none", () => {

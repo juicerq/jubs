@@ -1,9 +1,16 @@
 import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { idempotencyKeyFor } from "@/Idempotency"
-import { createJobs, defineHandler, defineJob, type JobFailureEvent } from "@/index"
+import {
+	createJobs,
+	defineHandler,
+	defineJob,
+	type JobDefinition,
+	type JobFailureEvent,
+} from "@/index"
 import { memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const renderReport = defineJob({
@@ -12,6 +19,16 @@ const renderReport = defineJob({
 	payload: type({ reportId: "string" }),
 	result: type({ url: "string.url" }),
 })
+
+function keyOf(definition: JobDefinition, data: unknown): string {
+	const key = idempotencyKeyFor(definition, data)
+
+	if (!key) {
+		throw new Error(`the ${definition.name} definition declares no idempotency key`)
+	}
+
+	return key
+}
 
 describe("a definition that declares a result schema", () => {
 	test("runs a handler whose return value the schema accepts", async () => {
@@ -55,7 +72,7 @@ describe("a definition that declares a result schema", () => {
 		const enqueued = await jobs.enqueue(renderReport, { reportId: "rep-1" })
 		const failure = await driver.runNext().catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("result")
+		expect(errorOf(failure).message).toContain("result")
 		expect(ran).toBe(1)
 
 		const buried = await driver.dead.list(renderReport.queue)
@@ -97,10 +114,10 @@ describe("a definition that declares a result schema", () => {
 			},
 		})
 
-		const key = idempotencyKeyFor(settleInvoice, { invoiceId: "inv-1" })
+		const key = keyOf(settleInvoice, { invoiceId: "inv-1" })
 
 		expect(delivered).toEqual({ total: 500 })
-		expect(driver.completed).toEqual([{ key: key as string, kept: { result: { total: 500 } } }])
+		expect(driver.completed).toEqual([{ key, kept: { result: { total: 500 } } }])
 	})
 
 	test("keeps the JSON projection of the validated value, the way redis keeps it", async () => {
@@ -122,8 +139,8 @@ describe("a definition that declares a result schema", () => {
 
 		expect(await driver.drain()).toBe(1)
 
-		const key = idempotencyKeyFor(stampBackup, { backupId: "bak-1" })
-		const replayed = await driver.idempotency.acquire({ key: key as string, leaseMs: 1_000 })
+		const key = keyOf(stampBackup, { backupId: "bak-1" })
+		const replayed = await driver.idempotency.acquire({ key, leaseMs: 1_000 })
 
 		expect(replayed).toEqual({ state: "complete", kept: { result: { at: taken } } })
 	})

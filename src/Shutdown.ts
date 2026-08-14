@@ -1,4 +1,4 @@
-export const SHUTDOWN_REDELIVERY_MS = 1_000
+const SHUTDOWN_REDELIVERY_MS = 1_000
 
 /**
  * The reason jubs aborts a handler's signal when `close({ timeoutMs })` runs

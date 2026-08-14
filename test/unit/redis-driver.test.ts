@@ -5,7 +5,6 @@ import type { FlowChildNode, FlowNode } from "@/Driver"
 import {
 	assertBlockingConnection,
 	cancelUnderLock,
-	HELD_RETRY_MS,
 	readFlowState,
 	readLease,
 	toFlowJob,
@@ -13,7 +12,9 @@ import {
 } from "@/RedisDriver"
 
 function connection(shape: unknown): ConnectionOptions {
-	return shape as ConnectionOptions
+	const fixture: ConnectionOptions = JSON.parse(JSON.stringify(shape))
+
+	return fixture
 }
 
 function deduplication(unique: ResolvedUnique) {
@@ -51,6 +52,22 @@ describe("assertBlockingConnection", () => {
 
 	test("skips a client that carries no ioredis options at all", () => {
 		expect(() => assertBlockingConnection(connection({}))).not.toThrow()
+	})
+
+	test("refuses a bare options object that retries requests", () => {
+		expect(() => assertBlockingConnection(connection({ maxRetriesPerRequest: 20 }))).toThrow(
+			"maxRetriesPerRequest: null",
+		)
+	})
+
+	test("refuses a cluster options object whose redisOptions retry requests", () => {
+		expect(() =>
+			assertBlockingConnection(connection({ redisOptions: { maxRetriesPerRequest: 20 } })),
+		).toThrow("maxRetriesPerRequest: null")
+	})
+
+	test("accepts a bare options object that turned retries off", () => {
+		expect(() => assertBlockingConnection(connection({ maxRetriesPerRequest: null }))).not.toThrow()
 	})
 })
 
@@ -92,11 +109,8 @@ describe("the idempotency lease Redis replies with", () => {
 		expect(readLease([], "token-1")).toEqual({ state: "acquired", token: "token-1" })
 	})
 
-	test("a running marker means another delivery holds the lease, and its ttl is the wait", () => {
-		expect(readLease(["running:token-0", 5_000], "token-1")).toEqual({
-			state: "held",
-			retryInMs: 5_000,
-		})
+	test("a running marker means another delivery holds the lease", () => {
+		expect(readLease(["running:token-0", 5_000], "token-1")).toEqual({ state: "held" })
 	})
 
 	test("a stored kept result means the key is complete", () => {
@@ -108,13 +122,6 @@ describe("the idempotency lease Redis replies with", () => {
 
 	test("a completion marker alone means the key is complete and gives back nothing", () => {
 		expect(readLease(["{}", 5_000], "token-1")).toEqual({ state: "complete", kept: {} })
-	})
-
-	test("a running marker without a positive ttl waits the default instead", () => {
-		expect(readLease(["running:token-0", -2], "token-1")).toEqual({
-			state: "held",
-			retryInMs: HELD_RETRY_MS,
-		})
 	})
 })
 

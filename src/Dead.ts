@@ -72,7 +72,7 @@ export type DeadJob = DeadEntry & {
 	readonly id: string
 }
 
-export class DeadRecordError extends Error {
+class DeadRecordError extends Error {
 	constructor(reason: string) {
 		super(
 			`jubs: the stored dead record is not a jubs burial — ${reason}. Nothing can replay a record of this shape; drop it with jobs.dead.discard(id).`,
@@ -82,7 +82,7 @@ export class DeadRecordError extends Error {
 }
 
 function isDeadReason(value: unknown): value is DeadReason {
-	return DEAD_REASONS.includes(value as DeadReason)
+	return DEAD_REASONS.some((reason) => reason === value)
 }
 
 function readSnapshot(stored: unknown, field: string): ErrorSnapshot {
@@ -92,32 +92,39 @@ function readSnapshot(stored: unknown, field: string): ErrorSnapshot {
 		)
 	}
 
-	const snapshot = stored as Partial<SerializedError>
+	const name: unknown = Reflect.get(stored, "name")
+	const message: unknown = Reflect.get(stored, "message")
+	const stack: unknown = Reflect.get(stored, "stack")
 
-	if (typeof snapshot.name !== "string") {
+	if (typeof name !== "string") {
 		throw new DeadRecordError(`its ${field} carries no error name`)
 	}
 
-	if (typeof snapshot.message !== "string") {
+	if (typeof message !== "string") {
 		throw new DeadRecordError(`its ${field} carries no error message`)
 	}
 
-	if (snapshot.stack !== undefined && typeof snapshot.stack !== "string") {
+	if (stack !== undefined && typeof stack !== "string") {
 		throw new DeadRecordError(`its ${field} carries a stack that is not text`)
 	}
 
-	const read: ErrorSnapshot = { name: snapshot.name, message: snapshot.message }
+	const read: ErrorSnapshot = { name, message }
 
-	if (snapshot.stack === undefined) {
+	if (stack === undefined) {
 		return read
 	}
 
-	return { ...read, stack: snapshot.stack }
+	return { ...read, stack }
 }
 
 function readError(stored: unknown): SerializedError {
 	const read = readSnapshot(stored, "error")
-	const cause = (stored as Partial<SerializedError>).cause
+
+	if (typeof stored !== "object" || stored === null) {
+		return read
+	}
+
+	const cause: unknown = Reflect.get(stored, "cause")
 
 	if (cause === undefined) {
 		return read
@@ -133,18 +140,22 @@ function readChildren(stored: unknown): readonly ChildResult[] {
 		)
 	}
 
-	const stray = stored.findIndex(
-		(child: unknown) =>
+	const read: ChildResult[] = []
+
+	for (const child of stored) {
+		if (
 			typeof child !== "object" ||
 			child === null ||
-			typeof (child as Partial<ChildResult>).slot !== "string",
-	)
+			!("slot" in child) ||
+			typeof child.slot !== "string"
+		) {
+			throw new DeadRecordError(`its child ${JSON.stringify(child)} names no slot it filled`)
+		}
 
-	if (stray >= 0) {
-		throw new DeadRecordError(`its child ${JSON.stringify(stored[stray])} names no slot it filled`)
+		read.push({ ...child, slot: child.slot, value: Reflect.get(child, "value") })
 	}
 
-	return stored as readonly ChildResult[]
+	return read
 }
 
 /**
@@ -161,41 +172,37 @@ export function readDeadEntry(stored: unknown): DeadEntry {
 		throw new DeadRecordError(`expected an object, got ${typeof stored}`)
 	}
 
-	const entry = stored as {
-		jobId?: unknown
-		envelope?: unknown
-		error?: unknown
-		reason?: unknown
-		children?: unknown
-	}
+	const jobId: unknown = Reflect.get(stored, "jobId")
+	const envelope: unknown = Reflect.get(stored, "envelope")
+	const error: unknown = Reflect.get(stored, "error")
+	const reason: unknown = Reflect.get(stored, "reason")
+	const children: unknown = Reflect.get(stored, "children")
 
-	if (typeof entry.jobId !== "string" || entry.jobId.length === 0) {
+	if (typeof jobId !== "string" || jobId.length === 0) {
 		throw new DeadRecordError("its job id is missing, so it names no job to put back")
 	}
 
-	if (!isDeadReason(entry.reason)) {
-		throw new DeadRecordError(
-			`its reason ${JSON.stringify(entry.reason)} is not one a job is buried for`,
-		)
+	if (!isDeadReason(reason)) {
+		throw new DeadRecordError(`its reason ${JSON.stringify(reason)} is not one a job is buried for`)
 	}
 
 	const buried = {
-		jobId: entry.jobId,
-		envelope: readEnvelope(entry.envelope),
-		error: readError(entry.error),
+		jobId,
+		envelope: readEnvelope(envelope),
+		error: readError(error),
 	}
 
-	if (entry.reason === "child_dead") {
-		return { ...buried, reason: entry.reason, children: readChildren(entry.children) }
+	if (reason === "child_dead") {
+		return { ...buried, reason, children: readChildren(children) }
 	}
 
-	if (entry.children !== undefined) {
+	if (children !== undefined) {
 		throw new DeadRecordError(
-			`it was buried for "${entry.reason}" and still carries children, which only a child_dead burial holds`,
+			`it was buried for "${reason}" and still carries children, which only a child_dead burial holds`,
 		)
 	}
 
-	return { ...buried, reason: entry.reason }
+	return { ...buried, reason }
 }
 
 const DEAD_SUFFIX = ".dead"

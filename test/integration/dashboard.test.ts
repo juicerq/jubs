@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test"
-import type { AddressInfo } from "node:net"
+import type { Server } from "node:net"
 import { ExpressAdapter } from "@bull-board/express"
 import { type } from "arktype"
 import { Queue } from "bullmq"
@@ -60,14 +60,37 @@ interface BoardQueueRead {
 }
 
 async function readBoard(origin: string, activeQueue: string): Promise<BoardQueueRead[]> {
-	const query = new URLSearchParams({ activeQueue, status: "latest" })
-	const response = await fetch(`${origin}${BASE_PATH}/api/queues?${query}`)
+	const url = new URL(`${origin}${BASE_PATH}/api/queues`)
+
+	url.searchParams.set("activeQueue", activeQueue)
+	url.searchParams.set("status", "latest")
+
+	const response = await fetch(url)
 
 	expect(response.status).toBe(200)
 
-	const body = (await response.json()) as { queues: BoardQueueRead[] }
+	const body: unknown = await response.json()
+
+	if (
+		typeof body !== "object" ||
+		body === null ||
+		!("queues" in body) ||
+		!Array.isArray(body.queues)
+	) {
+		throw new Error("the board answered no queue listing")
+	}
 
 	return body.queues
+}
+
+function portOf(server: Server): number {
+	const address = server.address()
+
+	if (typeof address !== "object" || address === null) {
+		throw new Error("the board server reported no address")
+	}
+
+	return address.port
 }
 
 /**
@@ -83,9 +106,7 @@ function served(app: express.Express): string {
 			}),
 	)
 
-	const { port } = server.address() as AddressInfo
-
-	return `http://127.0.0.1:${port}`
+	return `http://127.0.0.1:${portOf(server)}`
 }
 
 function found(queues: readonly BoardQueueRead[], name: string): BoardQueueRead {
@@ -203,8 +224,7 @@ describe("mounting the board on a real server", () => {
 
 		closing.push(() => app.close())
 
-		const { port } = app.server.address() as AddressInfo
-		const queues = await readBoard(`http://127.0.0.1:${port}`, definition.queue)
+		const queues = await readBoard(`http://127.0.0.1:${portOf(app.server)}`, definition.queue)
 		const live = found(queues, definition.queue)
 
 		expect(queues.map((queue) => queue.name)).toEqual([definition.queue, dead])

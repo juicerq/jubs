@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { createJobs, DELIVERY_DEFAULTS, defineJob, PayloadError } from "@/index"
 import { liveId } from "../support/JobIds"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const sendEmail = defineJob({
@@ -54,7 +55,7 @@ describe("enqueue", () => {
 			.catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(PayloadError)
-		expect((failure as PayloadError).message).toContain("email.send")
+		expect(errorOf(failure).message).toContain("email.send")
 		expect(driver.enqueued).toEqual([])
 	})
 })

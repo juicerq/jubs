@@ -9,6 +9,7 @@ import {
 	every,
 } from "@/index"
 import { memoryDriver } from "@/testing/index"
+import { errorOf } from "../support/Failures"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -105,7 +106,7 @@ describe("memoryDriver", () => {
 			.runNext()
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("no pending job")
+		expect(errorOf(failure).message).toContain("no pending job")
 	})
 
 	test("runNext fails when no consumer is open on the job's queue", async () => {
@@ -115,22 +116,23 @@ describe("memoryDriver", () => {
 
 		const failure = await driver.runNext().catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain('no consumer on queue "billing"')
-		expect((failure as Error).message).toContain("jobs.start(handlers)")
+		expect(errorOf(failure).message).toContain('no consumer on queue "billing"')
+		expect(errorOf(failure).message).toContain("jobs.start(handlers)")
 	})
 
 	test("enqueue fails on a delivery option it does not simulate", async () => {
 		const driver = memoryDriver()
+		const delivery: Delivery = { ...DELIVERY_DEFAULTS, delayMs: 5_000 }
 
 		const failure = await driver
 			.enqueue({
 				queue: "billing",
 				envelope: { v: 1, name: "billing.charge", data: { cents: "500" }, origin: "direct" },
-				delivery: { ...DELIVERY_DEFAULTS, delayMs: 5_000 } as Delivery,
+				delivery,
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe(
+		expect(errorOf(failure).message).toBe(
 			'jubs: memoryDriver does not simulate "delayMs"; test that behaviour against redisDriver',
 		)
 		expect(driver.enqueued(chargeCard)).toEqual([])
@@ -138,19 +140,20 @@ describe("memoryDriver", () => {
 
 	test("enqueue fails on a unique policy, which only a real queue enforces", async () => {
 		const driver = memoryDriver()
+		const delivery: Delivery = {
+			...DELIVERY_DEFAULTS,
+			unique: { mode: "keepFirst", key: "charge:500" },
+		}
 
 		const failure = await driver
 			.enqueue({
 				queue: "billing",
 				envelope: { v: 1, name: "billing.charge", data: { cents: "500" }, origin: "direct" },
-				delivery: {
-					...DELIVERY_DEFAULTS,
-					unique: { mode: "keepFirst", key: "charge:500" },
-				} as Delivery,
+				delivery,
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe(
+		expect(errorOf(failure).message).toBe(
 			'jubs: memoryDriver does not simulate "unique"; test that behaviour against redisDriver',
 		)
 		expect(driver.enqueued(chargeCard)).toEqual([])
@@ -183,7 +186,7 @@ describe("memoryDriver", () => {
 
 		const failure = await driver.drain().catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe("the card was declined")
+		expect(errorOf(failure).message).toBe("the card was declined")
 	})
 
 	test("drain runs the jobs a running handler enqueues", async () => {
@@ -217,7 +220,7 @@ describe("memoryDriver", () => {
 
 		const failure = await driver.runNext().catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain('no consumer on queue "billing"')
+		expect(errorOf(failure).message).toContain('no consumer on queue "billing"')
 	})
 
 	test("drain returns 0 when nothing is pending", async () => {
@@ -242,13 +245,13 @@ describe("memoryDriver", () => {
 			.start([defineHandler(sweepSessions, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe(
+		expect(errorOf(failure).message).toBe(
 			'jubs: memoryDriver does not simulate "schedule"; test that behaviour against redisDriver',
 		)
 
 		const orphan = await driver.runNext().catch((error: unknown) => error)
 
-		expect((orphan as Error).message).toContain('no consumer on queue "maintenance"')
+		expect(errorOf(orphan).message).toContain('no consumer on queue "maintenance"')
 	})
 
 	test("start accepts a queue that declares no schedule", async () => {

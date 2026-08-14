@@ -6,9 +6,12 @@ import type { Envelope } from "@/Envelope"
 import { createJobs, DELIVERY_DEFAULTS, VersionAheadError } from "@/index"
 import { migrateEnvelope } from "@/Migration"
 import { type MemoryDriver, memoryDriver } from "@/testing/index"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const contactPayload = type({ email: "string" })
+const storedContact = type({ mail: "string" })
+const storedObject = type("object")
 
 const oldContact = defineJob({
 	name: "contact.sync",
@@ -21,7 +24,7 @@ const currentContact = defineJob({
 	queue: "crm",
 	payload: contactPayload,
 	version: 2,
-	migrations: { 1: (data) => ({ email: (data as { mail: string }).mail }) },
+	migrations: { 1: (data) => ({ email: storedContact.assert(data).mail }) },
 })
 
 function envelopeAt(version: number, data: unknown): Envelope {
@@ -59,7 +62,7 @@ describe("migrateEnvelope", () => {
 			payload: contactPayload,
 			version: 2,
 			migrations: {
-				1: (data) => ({ email: (data as { mail: string }).mail }),
+				1: (data) => ({ email: storedContact.assert(data).mail }),
 			},
 		})
 
@@ -80,17 +83,17 @@ describe("migrateEnvelope", () => {
 				1: (data) => {
 					ran.push(1)
 
-					return { ...(data as object), one: true }
+					return { ...storedObject.assert(data), one: true }
 				},
 				2: async (data) => {
 					ran.push(2)
 
-					return { ...(data as object), two: true }
+					return { ...storedObject.assert(data), two: true }
 				},
 				3: (data) => {
 					ran.push(3)
 
-					return { ...(data as object), three: true }
+					return { ...storedObject.assert(data), three: true }
 				},
 			},
 		})
@@ -141,8 +144,8 @@ describe("migrateEnvelope", () => {
 			(error: unknown) => error,
 		)
 
-		expect((failure as Error).message).toContain("contact.sync")
-		expect((failure as Error).message).toContain("1")
+		expect(errorOf(failure).message).toContain("contact.sync")
+		expect(errorOf(failure).message).toContain("1")
 	})
 
 	test("keeps the cause of a step that threw", async () => {
@@ -164,8 +167,8 @@ describe("migrateEnvelope", () => {
 			(error: unknown) => error,
 		)
 
-		expect((failure as Error).message).toContain("the stored shape has no mail field")
-		expect((failure as Error).cause).toBe(declined)
+		expect(errorOf(failure).message).toContain("the stored shape has no mail field")
+		expect(errorOf(failure).cause).toBe(declined)
 	})
 
 	test("refuses an envelope written by a version ahead of the running one", async () => {
@@ -183,7 +186,7 @@ describe("migrateEnvelope", () => {
 
 		expect(failure).toBeInstanceOf(VersionAheadError)
 		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain("contact.sync")
+		expect(errorOf(failure).message).toContain("contact.sync")
 	})
 })
 

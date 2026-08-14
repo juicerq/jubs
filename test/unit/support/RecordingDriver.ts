@@ -16,15 +16,15 @@ import type {
  * counts no deliveries: the two numbers only part when a delivery is handed out
  * again without its attempt ending, which is a test's own to state.
  */
-export type RecordedDelivery = Omit<JobDelivery, "attemptsStarted"> &
+type RecordedDelivery = Omit<JobDelivery, "attemptsStarted"> &
 	Partial<Pick<JobDelivery, "attemptsStarted">>
 
-export interface RecordedCompletion {
+interface RecordedCompletion {
 	readonly key: string
 	readonly kept: KeptResult
 }
 
-export interface RecordedFlowRead {
+interface RecordedFlowRead {
 	readonly queue: string
 	readonly id: string
 }
@@ -45,7 +45,7 @@ export interface RecordingDriver extends JobDriver {
 	refuseClose(): void
 	refuseSchedules(): void
 	keepResult(key: string, kept: KeptResult): void
-	holdLease(key: string, retryInMs: number): void
+	holdLease(key: string): void
 }
 
 const REFUSED_RECONCILE = "recordingDriver was told to refuse the schedules of this start"
@@ -67,7 +67,7 @@ export function recordingDriver(): RecordingDriver {
 	const released: string[] = []
 	const completed: RecordedCompletion[] = []
 	const kept = new Map<string, KeptResult>()
-	const holds = new Map<string, number>()
+	const holds = new Set<string>()
 	const tokens = new Map<string, string>()
 	const inFlight = new Set<Promise<unknown>>()
 	let delivered = 0
@@ -126,8 +126,8 @@ export function recordingDriver(): RecordingDriver {
 			kept.set(key, result)
 		},
 
-		holdLease(key, retryInMs) {
-			holds.set(key, retryInMs)
+		holdLease(key: string) {
+			holds.add(key)
 		},
 
 		idempotency: {
@@ -140,10 +140,8 @@ export function recordingDriver(): RecordingDriver {
 					return { state: "complete", kept: complete }
 				}
 
-				const retryInMs = holds.get(key)
-
-				if (retryInMs !== undefined) {
-					return { state: "held", retryInMs }
+				if (holds.has(key)) {
+					return { state: "held" }
 				}
 
 				const token = randomUUID()
@@ -184,7 +182,11 @@ export function recordingDriver(): RecordingDriver {
 					return "running"
 				}
 
-				return kept.delete(key) ? "forgotten" : "not_found"
+				if (kept.delete(key)) {
+					return "forgotten"
+				}
+
+				return "not_found"
 			},
 		},
 
@@ -236,7 +238,7 @@ export function recordingDriver(): RecordingDriver {
 
 					consumers.delete(request.queue)
 
-					await Promise.allSettled([...inFlight])
+					await Promise.allSettled(inFlight)
 				},
 			}
 		},

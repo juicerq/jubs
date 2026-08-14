@@ -29,7 +29,11 @@ export function composeChildId(slot: string): string {
 export function readChildSlot(storedId: string): string {
 	const cut = storedId.indexOf(FLOW_ID_MARKER)
 
-	return cut < 1 ? "" : storedId.slice(0, cut)
+	if (cut < 1) {
+		return ""
+	}
+
+	return storedId.slice(0, cut)
 }
 
 /**

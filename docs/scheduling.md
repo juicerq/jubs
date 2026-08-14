@@ -25,13 +25,13 @@ export const digestHandler = defineHandler(sendDigest, async (data) => {
 
 Five constructors build a schedule.
 
-| Constructor | When the job runs |
-| --- | --- |
-| `every("5 minutes")` | at that interval — second, minute, hour or day |
-| `dailyAt("07:00")` | every day at that time, in 24 hours |
-| `weeklyOn("monday", "09:00")` | that weekday, at that time |
-| `monthlyOn(1, "00:00")` | that day of the month, at that time |
-| `cron("0 */6 * * *")` | whenever the pattern says |
+| Constructor                   | When the job runs                              |
+| ----------------------------- | ---------------------------------------------- |
+| `every("5 minutes")`          | at that interval — second, minute, hour or day |
+| `dailyAt("07:00")`            | every day at that time, in 24 hours            |
+| `weeklyOn("monday", "09:00")` | that weekday, at that time                     |
+| `monthlyOn(1, "00:00")`       | that day of the month, at that time            |
+| `cron("0 */6 * * *")`         | whenever the pattern says                      |
 
 The payload goes in the constructor's options, as `data`. A scheduled job has no producer to hand it one, so it carries its own. `start` validates that `data` against the definition's payload schema and throws when it does not pass — the check an enqueue would have run at the call site, run at boot instead.
 
@@ -85,4 +85,3 @@ A scheduled definition with `delayMs` in its delivery makes `start` throw. A del
 A definition cannot declare `schedule` and `awaits` together, and `defineJob` refuses the pair. A recurrence enqueues one job on its own, with nothing to fill its slots — see [Flows](./flows.md) for what to write instead.
 
 The memory driver refuses a schedule. It does not simulate the clock, so starting a queue whose handlers declare one throws. A started queue that declares no schedule reconciles to nothing and passes. Test a schedule against `redisDriver`.
-

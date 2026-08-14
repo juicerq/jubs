@@ -527,13 +527,13 @@ export function createJobs(config: JobsConfig): JobsClient {
 			const live = readLiveJobId(id)
 
 			if (!live) {
-				return undefined
+				return
 			}
 
 			const snapshot = await config.driver.get(live.queue, live.storedId)
 
 			if (!snapshot) {
-				return undefined
+				return
 			}
 
 			return { ...snapshot, id: composeJobId(live.queue, snapshot.id) }

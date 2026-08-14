@@ -13,6 +13,7 @@ import {
 } from "@/index"
 import { memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
+import { errorOf } from "../support/Failures"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -178,9 +179,9 @@ describe("reading a job", () => {
 
 		const failure = await jobs.get("7").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("is not a job id")
-		expect((failure as Error).message).toContain("jobs.enqueue")
-		expect((failure as Error).message).toContain("jobs.dead.list(queue)")
+		expect(errorOf(failure).message).toContain("is not a job id")
+		expect(errorOf(failure).message).toContain("jobs.enqueue")
+		expect(errorOf(failure).message).toContain("jobs.dead.list(queue)")
 	})
 })
 
@@ -248,7 +249,7 @@ describe("retrying a job", () => {
 
 		const failure = await jobs.retry("7").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("is not a job id")
+		expect(errorOf(failure).message).toContain("is not a job id")
 	})
 })
 
@@ -449,7 +450,7 @@ describe("cancelling a job", () => {
 
 		const refused = await driver.runNext().catch((error: unknown) => error)
 
-		expect((refused as Error).message).toContain("idempotency lease is held")
+		expect(errorOf(refused).message).toContain("idempotency lease is held")
 		expect(bodies).toEqual(["order-1"])
 	})
 
@@ -480,7 +481,7 @@ describe("cancelling a job", () => {
 
 		const failure = await jobs.cancel("7").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("is not a job id")
+		expect(errorOf(failure).message).toContain("is not a job id")
 	})
 })
 
@@ -544,7 +545,7 @@ describe("pausing a queue", () => {
 
 		const failure = await driver.runNext().catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("paused queue")
-		expect((failure as Error).message).toContain("jobs.resume(queue)")
+		expect(errorOf(failure).message).toContain("paused queue")
+		expect(errorOf(failure).message).toContain("jobs.resume(queue)")
 	})
 })

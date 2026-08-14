@@ -4,7 +4,15 @@ export const IDEMPOTENCY_LEASE_MS = 30_000
 
 export const IDEMPOTENCY_RENEW_MS = 10_000
 
-export const IDEMPOTENCY_RESULT_RETENTION_MS: number = 24 * 60 * 60 * 1_000
+export const HELD_RETRY_FLOOR_MS = 100
+
+export const HELD_RETRY_MS = 1_000
+
+export function heldRetryDelayMs(deliveriesStarted: number): number {
+	return Math.min(HELD_RETRY_FLOOR_MS * 2 ** Math.max(deliveriesStarted - 1, 0), HELD_RETRY_MS)
+}
+
+const IDEMPOTENCY_RESULT_RETENTION_MS: number = 24 * 60 * 60 * 1_000
 
 export const IDEMPOTENCY_MAX_RESULT_BYTES: number = 64 * 1_024
 
@@ -14,24 +22,24 @@ export interface KeptResult {
 
 export type IdempotencyLease =
 	| { readonly state: "acquired"; readonly token: string }
-	| { readonly state: "held"; readonly retryInMs: number }
+	| { readonly state: "held" }
 	| { readonly state: "complete"; readonly kept: KeptResult }
 
-export interface AcquireRequest {
+interface AcquireRequest {
 	readonly key: string
 	readonly leaseMs: number
 }
 
-export interface RenewRequest extends AcquireRequest {
+interface RenewRequest extends AcquireRequest {
 	readonly token: string
 }
 
-export interface ReleaseRequest {
+interface ReleaseRequest {
 	readonly key: string
 	readonly token: string
 }
 
-export interface CompleteRequest extends ReleaseRequest {
+interface CompleteRequest extends ReleaseRequest {
 	readonly kept: KeptResult
 	readonly retainForMs: number
 }
@@ -85,18 +93,19 @@ export function stillRunning(error: unknown): Promise<unknown> | undefined {
 		return undefined
 	}
 
-	return error.running instanceof Promise ? error.running : undefined
+	if (error.running instanceof Promise) {
+		return error.running
+	}
+
+	return undefined
 }
 
 export class LeaseHeldError extends Error {
-	readonly delayMs: number
-
-	constructor(key: string, delayMs: number) {
+	constructor(key: string) {
 		super(
-			`jubs: the idempotency key "${key}" is held by a running delivery — this delivery waits ${delayMs}ms and is delivered again`,
+			`jubs: the idempotency key "${key}" is held by a running delivery — this delivery is postponed and delivered again`,
 		)
 		this.name = "LeaseHeldError"
-		this.delayMs = delayMs
 	}
 }
 
@@ -178,7 +187,7 @@ export async function runUnderKey(
 	const lease = await store.acquire({ key, leaseMs: IDEMPOTENCY_LEASE_MS })
 
 	if (lease.state === "held") {
-		throw new LeaseHeldError(key, lease.retryInMs)
+		throw new LeaseHeldError(key)
 	}
 
 	if (lease.state === "complete") {

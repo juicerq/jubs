@@ -6,6 +6,7 @@ import { deadQueueName } from "@/Dead"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { composeJobId } from "@/JobId"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
+import { errorOf } from "../support/Failures"
 import { liveId } from "../support/JobIds"
 import { waitFor, waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
@@ -37,6 +38,14 @@ async function keySettled(lease: string): Promise<boolean> {
 	const stored = await inspectorConnection.get(lease)
 
 	return !!stored && !stored.startsWith(RUNNING_PREFIX)
+}
+
+function nameOf(error: unknown): string {
+	if (error instanceof Error) {
+		return error.name
+	}
+
+	return ""
 }
 
 function chargeCardOn(queue: string) {
@@ -338,7 +347,7 @@ describe("dead queue over redis", () => {
 		const [dead] = await jobs.dead.list(settlePayment.queue)
 		const failure = await jobs.dead.replay(dead?.id ?? "").catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("held by a delivery running right now")
+		expect(errorOf(failure).message).toContain("held by a delivery running right now")
 		expect(await jobs.dead.list(settlePayment.queue)).toHaveLength(1)
 		expect(await live.getJobCountByTypes("waiting", "delayed", "active")).toBe(0)
 		expect(settled).toEqual(["held-1"])
@@ -377,7 +386,7 @@ describe("dead queue over redis", () => {
 
 		const failure = await jobs.dead.discard(id).catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain(id)
+		expect(errorOf(failure).message).toContain(id)
 
 		await runtime.close()
 	})
@@ -391,8 +400,8 @@ describe("a dead record over redis this library cannot read", () => {
 
 		const failure = await jobs.dead.replay(unreadableId).catch((error: unknown) => error)
 
-		expect((failure as Error).name).toBe("DeadRecordError")
-		expect((failure as Error).message).toContain(
+		expect(nameOf(failure)).toBe("DeadRecordError")
+		expect(errorOf(failure).message).toContain(
 			`its reason "${UNREADABLE_REASON}" is not one a job is buried for`,
 		)
 

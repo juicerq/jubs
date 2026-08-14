@@ -29,7 +29,7 @@ await jobs.enqueue(sendWelcomeEmail, { userId: "u_1", locale: "pt" })
 
 The payload is checked at the call site, and again when the job runs — because the job may have been written by an older deploy. The handler's `data` is typed from the same schema. There is no `switch`.
 
-And the expensive failure modes are already handled: an enqueue inside a database transaction that rolls back, a schedule deleted from the code but still firing in Redis, a job that runs twice after a pod restart, an envelope a rolling deploy cannot parse.
+And the expensive failure modes are already handled: an enqueue inside a database transaction that rolls back, a schedule deleted from the code but still firing in Redis, a job that runs twice after a pod restart, an envelope a rolling deploy cannot parse, a job that exhausted every attempt and sits in a dead queue waiting for inspection and replay.
 
 ## Install
 
@@ -108,21 +108,57 @@ process.on("SIGTERM", async () => {
 
 That is the whole loop. Everything below is optional.
 
+## Flows
+
+A job can wait on other jobs and read what they returned. The definition declares what it waits on — `awaits` maps a slot name to the definition that fills it — and every enqueue of that definition becomes a flow: the children run first, the parent runs once after all of them have settled. A definition can also declare a `result` schema, which types what its handler returns; a parent reads its children through it.
+
+```ts
+export const buildReport = defineJob({
+	name: "report.build",
+	queue: "reports",
+	payload: type({ month: "string" }),
+	result: type({ url: "string.url" }),
+	awaits: { rows: [fetchRows], budget: readBudget },
+})
+```
+
+A slot's shape says how many children it holds: `rows: [fetchRows]` waits on many, `budget: readBudget` on exactly one. `enqueue` takes what fills every slot as a third argument.
+
+```ts
+await jobs.enqueue(
+	buildReport,
+	{ month: "2026-01" },
+	{ rows: [{ source: "ledger" }, { source: "invoices" }], budget: { month: "2026-01" } },
+)
+```
+
+The parent reads `context.children`: one entry per slot, typed from the `result` schema of the definition that slot declares — `children.rows` is `readonly { rows: number }[]`, `children.budget` is `{ target: number }`.
+
+```ts
+export const buildReportHandler = defineHandler(buildReport, async (data, context) => {
+	const rows = context.children.rows.reduce((sum, part) => sum + part.rows, 0)
+
+	return { url: await reports.render(data.month, rows, context.children.budget.target) }
+})
+```
+
+A flow is for fan-in — one job that needs the results of several. A job that merely follows another is not a flow: enqueue it at the end of the first job's handler, so a failure retries the second job alone. A child that fails every attempt buries its parent with what the other children returned, kept for the same inspection and replay. The rule goes deeper — nesting, uniqueness, replay — in [Flows](https://github.com/juicerq/jubs/blob/main/docs/flows.md).
+
 ## Docs
 
-| Guide | What it covers |
-| --- | --- |
-| [Definitions and handlers](https://github.com/juicerq/jubs/blob/main/docs/definitions.md) | the payload schema, the handler context, and typing what a handler returns |
-| [The two-process split](https://github.com/juicerq/jubs/blob/main/docs/processes.md) | why the two processes stay apart, wrapping `enqueue`, and the four checks `start` runs at boot |
-| [Delivery, tuning and shutdown](https://github.com/juicerq/jubs/blob/main/docs/delivery.md) | attempts, backoff, delay, priority, per-queue concurrency and limiter, `timeoutMs`, `close` |
-| [Uniqueness and idempotency](https://github.com/juicerq/jubs/blob/main/docs/uniqueness.md) | one job in flight per key, and a job that runs once across a pod restart |
-| [The atomic block and the outbox](https://github.com/juicerq/jubs/blob/main/docs/outbox.md) | enqueue inside a database transaction, delivered only once it commits |
-| [Scheduling](https://github.com/juicerq/jubs/blob/main/docs/scheduling.md) | recurrence declared on the definition — delete it from the code and it stops firing |
-| [Flows](https://github.com/juicerq/jubs/blob/main/docs/flows.md) | a parent job that waits on children and reads what they returned |
-| [Validation and versioning](https://github.com/juicerq/jubs/blob/main/docs/versioning.md) | change a payload shape without losing the jobs already in Redis |
-| [Operations](https://github.com/juicerq/jubs/blob/main/docs/operations.md) | `get`, `retry`, `cancel`, `pause`, `resume`, the lifecycle hooks, and the dead queue |
-| [Testing](https://github.com/juicerq/jubs/blob/main/docs/testing.md) | `memoryDriver()` — the real validation and the real dispatch, with no Redis |
-| [Dashboard](https://github.com/juicerq/jubs/blob/main/docs/dashboard.md) | a read-only Bull Board over the queues your definitions use |
+| Guide                                                                                       | What it covers                                                                                 |
+| ------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| [Definitions and handlers](https://github.com/juicerq/jubs/blob/main/docs/definitions.md)   | the payload schema, the handler context, and typing what a handler returns                     |
+| [The two-process split](https://github.com/juicerq/jubs/blob/main/docs/processes.md)        | why the two processes stay apart, wrapping `enqueue`, and the four checks `start` runs at boot |
+| [Delivery, tuning and shutdown](https://github.com/juicerq/jubs/blob/main/docs/delivery.md) | attempts, backoff, delay, priority, per-queue concurrency and limiter, `timeoutMs`, `close`    |
+| [Uniqueness and idempotency](https://github.com/juicerq/jubs/blob/main/docs/uniqueness.md)  | one job in flight per key, and a job that runs once across a pod restart                       |
+| [The atomic block and the outbox](https://github.com/juicerq/jubs/blob/main/docs/outbox.md) | enqueue inside a database transaction, delivered only once it commits                          |
+| [Scheduling](https://github.com/juicerq/jubs/blob/main/docs/scheduling.md)                  | recurrence declared on the definition — delete it from the code and it stops firing            |
+| [Flows](https://github.com/juicerq/jubs/blob/main/docs/flows.md)                            | a parent job that waits on children and reads what they returned                               |
+| [Validation and versioning](https://github.com/juicerq/jubs/blob/main/docs/versioning.md)   | change a payload shape without losing the jobs already in Redis                                |
+| [Operations](https://github.com/juicerq/jubs/blob/main/docs/operations.md)                  | `get`, `retry`, `cancel`, `pause`, `resume`, the lifecycle hooks, and the dead queue           |
+| [Testing](https://github.com/juicerq/jubs/blob/main/docs/testing.md)                        | `memoryDriver()` — the real validation and the real dispatch, with no Redis                    |
+| [Dashboard](https://github.com/juicerq/jubs/blob/main/docs/dashboard.md)                    | a read-only Bull Board over the queues your definitions use                                    |
 
 The [decision records](https://github.com/juicerq/jubs/tree/main/docs/adr) say why the sharp parts are shaped the way they are.
 

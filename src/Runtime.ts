@@ -34,7 +34,7 @@ export const DEFAULT_CONCURRENCY = 10
 
 const DEFAULT_TIMEZONE = "UTC"
 
-export interface QueueTuning {
+interface QueueTuning {
 	readonly concurrency?: number
 	readonly limiter?: QueueLimiter
 }
@@ -43,7 +43,7 @@ export interface StartOptions<Queue extends string = string> {
 	readonly queues?: Partial<Record<Queue, QueueTuning>>
 }
 
-export interface CloseOptions {
+interface CloseOptions {
 	readonly timeoutMs?: number
 }
 

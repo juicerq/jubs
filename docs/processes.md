@@ -70,7 +70,6 @@ jubs installs no signal handler of its own. Shutdown is yours, and it is two ste
 
 A process that only enqueues has nothing to close. Its queue handles hold no socket of their own, so quitting your connection is enough.
 
-
 ## What `start` checks at boot
 
 A worker whose wiring is wrong should die at boot, not at three in the morning on the one job nobody tested. `start` runs three checks before it opens a single worker, and each error says what to change.
@@ -94,4 +93,3 @@ Now a worker that starts the `mail` queue must own a handler for every definitio
 A connection created without `maxRetriesPerRequest: null` is the third, described above.
 
 Tuning aimed at a queue this process does not start is the fourth: a typo in `start(handlers, { queues })` would otherwise swallow your concurrency and your limiter without a word, so the error names the key and lists the queues that did start.
-

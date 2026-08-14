@@ -4,7 +4,7 @@ import { Queue } from "bullmq"
 import IORedis from "ioredis"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { IDEMPOTENCY_KEY_PREFIX, RUNNING_PREFIX } from "@/RedisDriver"
-import { waitForFinished } from "../support/Wait"
+import { waitFor, waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
 import { REDIS_URL } from "./redis"
 
@@ -101,7 +101,9 @@ describe("handler timeout over redis", () => {
 		const live = await freshQueue(settlePayment.queue)
 		const paymentId = scoped("pay-1")
 
-		await inspectorConnection.del(leaseKey(settlePayment.name, paymentId))
+		const key = leaseKey(settlePayment.name, paymentId)
+
+		await inspectorConnection.del(key)
 
 		const jobs = createJobs({
 			driver: redisDriver(workerConnection),
@@ -119,18 +121,26 @@ describe("handler timeout over redis", () => {
 		])
 
 		const enqueued = await jobs.enqueue(settlePayment, { id: paymentId })
+		const stored = storedId(enqueued)
 
-		await Bun.sleep(700)
+		await waitFor(async () => (await live.getJob(stored))?.attemptsMade === 1)
 
-		const stored = await live.getJob(storedId(enqueued))
+		const postponed = await live.getJob(stored)
 
 		expect(bodies).toEqual([1])
-		expect(await stored?.getState()).toBe("delayed")
-		expect(stored?.attemptsMade).toBe(1)
+		expect(await inspectorConnection.get(key)).toStartWith(RUNNING_PREFIX)
+		expect(postponed?.attemptsMade).toBe(1)
+		expect(await jobs.dead.list(settlePayment.queue)).toEqual([])
+
+		const settled = await waitForFinished(live, stored)
+
+		expect(bodies).toEqual([1])
+		expect(await settled.getState()).toBe("completed")
+		expect(settled.attemptsMade).toBe(2)
 		expect(await jobs.dead.list(settlePayment.queue)).toEqual([])
 
 		await runtime.close()
-	})
+	}, 20_000)
 })
 
 describe("shutdown over redis", () => {

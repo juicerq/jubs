@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test"
 import { type } from "arktype"
 import { createJobs, DELIVERY_DEFAULTS, type Delivery, defineJob, every } from "@/index"
 import { memoryDriver } from "@/testing/index"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const chargeCard = defineJob({
@@ -90,8 +91,8 @@ describe("delivery", () => {
 			.enqueue(rebuild, { cents: "500" })
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("keepLast")
-		expect((failure as Error).message).toContain("ttlMs")
+		expect(errorOf(failure).message).toContain("keepLast")
+		expect(errorOf(failure).message).toContain("ttlMs")
 	})
 
 	test("holds a keepLast job for the window, keeping the longer of window and delay", async () => {

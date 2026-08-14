@@ -56,4 +56,3 @@ The value is validated the moment the handler resolves, before anything is store
 The validated value is what the handler's return value becomes. No client method reads it back — `jobs.get` answers with the job's state, not with its result. Underneath it is BullMQ's own `returnvalue`, which jubs does not surface. The one place it comes back to you is a repeated delivery under an [idempotency key](./uniqueness.md#idempotency): the key replays the validated value, as the JSON projection of it, so a `Date` the schema produced comes back a string. The size limit described there applies to it.
 
 A return value the schema rejects fails the attempt unrecoverably: it burns one attempt and is not retried, exactly as an invalid stored payload does. The failure is yours to fix in code, and five more attempts would only produce it again.
-

@@ -11,6 +11,7 @@ import {
 	type JobDefinition,
 	type ScheduleUpsert,
 } from "@/index"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const sweepSessions = defineJob({
@@ -124,7 +125,7 @@ describe("start reconciles the declared schedules", () => {
 			.start([defineHandler(sweepSessions, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("refuse the schedules")
+		expect(errorOf(failure).message).toContain("refuse the schedules")
 		expect(driver.consuming).toEqual([])
 	})
 })
@@ -181,8 +182,8 @@ describe("start boot checks on a schedule", () => {
 			.start([defineHandler(nightlyReport, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("report.nightly")
-		expect((failure as Error).message).toContain("`data`")
+		expect(errorOf(failure).message).toContain("report.nightly")
+		expect(errorOf(failure).message).toContain("`data`")
 		expect(driver.consuming).toEqual([])
 		expect(driver.reconciled).toEqual([])
 	})
@@ -202,8 +203,8 @@ describe("start boot checks on a schedule", () => {
 			.start([defineHandler(digestReport, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("report.digest")
-		expect((failure as Error).message).toContain("`delayMs`")
+		expect(errorOf(failure).message).toContain("report.digest")
+		expect(errorOf(failure).message).toContain("`delayMs`")
 		expect(driver.consuming).toEqual([])
 		expect(driver.reconciled).toEqual([])
 	})

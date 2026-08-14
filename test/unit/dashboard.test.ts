@@ -3,6 +3,7 @@ import { type } from "arktype"
 import { type BoardConfig, boardQueues, loaded } from "@/dashboard/Board"
 import { expressDashboard, fastifyDashboard } from "@/dashboard/index"
 import { defineJob } from "@/index"
+import { errorOf } from "../support/Failures"
 
 const chargeCard = defineJob({
 	name: "billing.charge",
@@ -47,15 +48,15 @@ const options = {
  * the runtime rather than written out here — the whole rewrite turns on the
  * `code` this carries, and a hand-made error would only prove itself.
  */
-function missingModule(): Promise<never> {
+function missingModule(): Promise<unknown> {
 	const absent: string = "@bull-board/express-nobody-installed"
 
-	return import(absent) as Promise<never>
+	return import(absent)
 }
 
 function failureOf(loading: Promise<unknown>): Promise<unknown> {
 	return loading.then(
-		() => undefined,
+		() => {},
 		(error: unknown) => error,
 	)
 }
@@ -151,7 +152,7 @@ describe("a peer that is not installed", () => {
 		const failure = await failureOf(loaded("@bull-board/express", missingModule()))
 
 		expect(failure).toBeInstanceOf(Error)
-		expect((failure as Error).message).toBe(
+		expect(errorOf(failure).message).toBe(
 			'jubs: @juicerq/jubs/dashboard needs "@bull-board/express", which is an optional peer and is not installed — run `npm install @bull-board/api @bull-board/express`',
 		)
 	})
@@ -159,7 +160,7 @@ describe("a peer that is not installed", () => {
 	test("names the api alone when the api is what is missing", async () => {
 		const failure = await failureOf(loaded("@bull-board/api", missingModule()))
 
-		expect((failure as Error).message).toBe(
+		expect(errorOf(failure).message).toBe(
 			'jubs: @juicerq/jubs/dashboard needs "@bull-board/api", which is an optional peer and is not installed — run `npm install @bull-board/api`',
 		)
 	})
@@ -168,7 +169,7 @@ describe("a peer that is not installed", () => {
 		const absent = Object.assign(new Error("Cannot find module"), { code: "MODULE_NOT_FOUND" })
 		const failure = await failureOf(loaded("@bull-board/fastify", Promise.reject(absent)))
 
-		expect((failure as Error).message).toContain('needs "@bull-board/fastify"')
+		expect(errorOf(failure).message).toContain('needs "@bull-board/fastify"')
 	})
 
 	test("hands back a failure that is not a missing module untouched", async () => {
@@ -192,14 +193,14 @@ describe("a peer that is not installed", () => {
 describe("a mount whose peer is not installed", () => {
 	for (const peer of ["@bull-board/express", "@bull-board/fastify"]) {
 		test(`${peer} says what to install rather than what the runtime threw`, async () => {
-			mock.module(peer, () => {
+			await mock.module(peer, () => {
 				throw Object.assign(new Error("Cannot find package"), { code: "ERR_MODULE_NOT_FOUND" })
 			})
 
 			const mount = peer.endsWith("express") ? expressDashboard : fastifyDashboard
 			const failure = await failureOf(mount(options))
 
-			expect((failure as Error).message).toBe(
+			expect(errorOf(failure).message).toBe(
 				`jubs: @juicerq/jubs/dashboard needs "${peer}", which is an optional peer and is not installed — run \`npm install @bull-board/api ${peer}\``,
 			)
 		})

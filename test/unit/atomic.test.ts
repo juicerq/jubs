@@ -5,6 +5,7 @@ import { createJobs, defineHandler, defineJob, type JobDriver } from "@/index"
 import { memoryDriver } from "@/testing/index"
 import { liveId } from "../support/JobIds"
 import { type RecordingDriver, recordingDriver } from "./support/RecordingDriver"
+import { errorOf } from "../support/Failures"
 
 const sendEmail = defineJob({
 	name: "email.send",
@@ -99,7 +100,7 @@ describe("atomic", () => {
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe("the order was refused")
+		expect(errorOf(failure).message).toBe("the order was refused")
 		expect(driver.enqueued).toEqual([])
 	})
 
@@ -206,16 +207,16 @@ describe("an enqueue that outlives its atomic block", () => {
 		const late = Promise.withResolvers<unknown>()
 
 		await jobs.atomic(async () => {
-			setImmediate(async () => {
+			setImmediate(() => {
 				late.resolve(
-					await jobs
+					jobs
 						.enqueue(sendEmail, { to: "ada@example.com", subject: "late" })
 						.catch((error: unknown) => error),
 				)
 			})
 		})
 
-		expect(((await late.promise) as Error).message).toContain("already ended")
+		expect(errorOf(await late.promise).message).toContain("already ended")
 		expect(driver.enqueued).toEqual([])
 	})
 
@@ -226,9 +227,9 @@ describe("an enqueue that outlives its atomic block", () => {
 
 		await jobs
 			.atomic(async () => {
-				setImmediate(async () => {
+				setImmediate(() => {
 					late.resolve(
-						await jobs
+						jobs
 							.enqueue(sendEmail, { to: "ada@example.com", subject: "late" })
 							.catch((error: unknown) => error),
 					)
@@ -238,7 +239,7 @@ describe("an enqueue that outlives its atomic block", () => {
 			})
 			.catch(() => {})
 
-		expect(((await late.promise) as Error).message).toContain("already ended")
+		expect(errorOf(await late.promise).message).toContain("already ended")
 		expect(driver.enqueued).toEqual([])
 	})
 
@@ -258,7 +259,7 @@ describe("an enqueue that outlives its atomic block", () => {
 
 		resume.unlock()
 
-		expect(((await floating) as Error).message).toContain("already ended")
+		expect(errorOf(await floating).message).toContain("already ended")
 		expect(driver.enqueued).toEqual([])
 	})
 })
@@ -277,9 +278,9 @@ describe("a flush that fails", () => {
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("delivered 2 of the 4 jobs")
-		expect((failure as Error).message).toContain("1 after it were abandoned")
-		expect((failure as Error).cause).toBeInstanceOf(Error)
+		expect(errorOf(failure).message).toContain("delivered 2 of the 4 jobs")
+		expect(errorOf(failure).message).toContain("1 after it were abandoned")
+		expect(errorOf(failure).cause).toBeInstanceOf(Error)
 		expect(driver.enqueued.map((record) => record.envelope.data)).toEqual([
 			{ to: "ada@example.com", subject: "first" },
 			{ to: "grace@example.com", subject: "second" },
@@ -327,7 +328,7 @@ describe("replaying a dead job inside an atomic block", () => {
 			})
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("inside an atomic block")
+		expect(errorOf(failure).message).toContain("inside an atomic block")
 		expect(await jobs.dead.list("mail")).toHaveLength(1)
 	})
 

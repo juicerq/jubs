@@ -30,6 +30,7 @@ export function inAtomicBlock(): boolean {
 	return !!scope && !scope.closed
 }
 
+// oxlint-disable-next-line juicerq/no-trivial-call-wrapper
 export function outsideAtomicBlock<Result>(run: () => Result): Result {
 	return openScopes.exit(run)
 }

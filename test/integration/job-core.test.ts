@@ -10,6 +10,7 @@ import {
 	type HandlerContext,
 	redisDriver,
 } from "@/index"
+import { errorOf } from "../support/Failures"
 import { liveId } from "../support/JobIds"
 import { waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
@@ -205,7 +206,7 @@ describe("job-core over redis", () => {
 			.catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(Error)
-		expect((failure as Error).message).toContain("maxRetriesPerRequest: null")
+		expect(errorOf(failure).message).toContain("maxRetriesPerRequest: null")
 		expect(retrying.status).toBe("wait")
 
 		retrying.disconnect()

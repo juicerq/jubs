@@ -42,7 +42,9 @@ interface MemoryJob {
  */
 function asJsonKeeps(kept: KeptResult): KeptResult {
 	try {
-		return JSON.parse(JSON.stringify(kept)) as KeptResult
+		const read: KeptResult = JSON.parse(JSON.stringify(kept))
+
+		return read
 	} catch {
 		return kept
 	}
@@ -251,7 +253,7 @@ export function memoryDriver(): MemoryDriver {
 	}
 
 	const idempotency: IdempotencyStore = {
-		async acquire({ key, leaseMs }) {
+		async acquire({ key }) {
 			const complete = kept.get(key)
 
 			if (complete) {
@@ -259,7 +261,7 @@ export function memoryDriver(): MemoryDriver {
 			}
 
 			if (leased.has(key)) {
-				return { state: "held", retryInMs: leaseMs }
+				return { state: "held" }
 			}
 
 			const token = randomUUID()
@@ -295,7 +297,11 @@ export function memoryDriver(): MemoryDriver {
 				return "running"
 			}
 
-			return kept.delete(key) ? "forgotten" : "not_found"
+			if (kept.delete(key)) {
+				return "forgotten"
+			}
+
+			return "not_found"
 		},
 	}
 
@@ -331,11 +337,13 @@ export function memoryDriver(): MemoryDriver {
 				return { id: already.id }
 			}
 
+			const envelope: Envelope = JSON.parse(JSON.stringify(request.envelope))
+
 			const job: MemoryJob = {
 				id: request.jobId || String(recorded.length + 1),
 				queue: request.queue,
 				maxAttempts: request.delivery.attempts,
-				envelope: JSON.parse(JSON.stringify(request.envelope)) as Envelope,
+				envelope,
 				state: "waiting",
 				attempts: 0,
 				attemptsStarted: 0,
@@ -352,7 +360,7 @@ export function memoryDriver(): MemoryDriver {
 			const job = jobAt(queue, id)
 
 			if (!job) {
-				return undefined
+				return
 			}
 
 			return {
@@ -458,7 +466,9 @@ export function memoryDriver(): MemoryDriver {
 				const dead = deadQueueFor(queue)
 
 				dead.deaths += 1
-				dead.entries.set(String(dead.deaths), JSON.parse(JSON.stringify(entry)) as DeadEntry)
+				const copy: DeadEntry = JSON.parse(JSON.stringify(entry))
+
+				dead.entries.set(String(dead.deaths), copy)
 			},
 
 			async list(queue) {
@@ -483,7 +493,7 @@ export function memoryDriver(): MemoryDriver {
 		enqueued<Payload extends StandardSchemaV1>(definition: JobDefinition<Payload>) {
 			return recorded
 				.filter((job) => job.envelope.name === definition.name)
-				.map((job) => job.envelope.data as StandardSchemaV1.InferInput<Payload>)
+				.map((job): StandardSchemaV1.InferInput<Payload> => Reflect.get(job.envelope, "data"))
 		},
 
 		runNext,

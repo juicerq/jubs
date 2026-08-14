@@ -12,6 +12,7 @@ import {
 } from "@/index"
 import { VersionAheadError } from "@/Migration"
 import { ShutdownAbortError } from "@/Shutdown"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const sendEmail = defineJob({
@@ -28,6 +29,14 @@ const chargeCard = defineJob({
 
 function envelopeFor(name: string, data: unknown): Envelope {
 	return { v: 1, name, data, origin: "direct" }
+}
+
+function causeOf(error: unknown): unknown {
+	if (error instanceof Error) {
+		return error.cause
+	}
+
+	return undefined
 }
 
 describe("start", () => {
@@ -127,7 +136,7 @@ describe("start", () => {
 			.catch((error: unknown) => error)
 
 		expect(failure).toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain("email.retired")
+		expect(errorOf(failure).message).toContain("email.retired")
 	})
 
 	test("fails unrecoverably when the stored payload no longer validates", async () => {
@@ -180,7 +189,7 @@ describe("start boot checks", () => {
 			.start([defineHandler(sendEmail, async () => {}), defineHandler(twin, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("email.send")
+		expect(errorOf(failure).message).toContain("email.send")
 		expect(driver.consuming).toEqual([])
 	})
 
@@ -197,7 +206,7 @@ describe("start boot checks", () => {
 			.start([defineHandler(sendEmail, async () => {})])
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("email.digest")
+		expect(errorOf(failure).message).toContain("email.digest")
 		expect(driver.consuming).toEqual([])
 	})
 
@@ -247,7 +256,7 @@ describe("handler timeout", () => {
 
 		expect(failure).toBeInstanceOf(Error)
 		expect(failure).not.toBeInstanceOf(UnrecoverableError)
-		expect((failure as Error).message).toContain("reports.render")
+		expect(errorOf(failure).message).toContain("reports.render")
 		expect(await aborted.promise).toBe(true)
 	})
 
@@ -293,7 +302,7 @@ describe("handler timeout", () => {
 
 		expect(aborted).toBeInstanceOf(Error)
 		expect(aborted).not.toBeInstanceOf(ShutdownAbortError)
-		expect((aborted as Error).message).toContain("timeoutMs")
+		expect(errorOf(aborted).message).toContain("timeoutMs")
 	})
 })
 
@@ -380,7 +389,7 @@ describe("close", () => {
 		const aborted = await delivered
 
 		expect(aborted).toBeInstanceOf(ShutdownAbortError)
-		expect((aborted as ShutdownAbortError).cause).toBe(failure)
+		expect(causeOf(aborted)).toBe(failure)
 	})
 
 	test("never makes the abort its own cause when the handler rethrows the signal reason", async () => {
@@ -409,7 +418,7 @@ describe("close", () => {
 		const aborted = await delivered
 
 		expect(aborted).toBeInstanceOf(ShutdownAbortError)
-		expect((aborted as ShutdownAbortError).cause).not.toBe(aborted)
+		expect(causeOf(aborted)).not.toBe(aborted)
 	})
 
 	test("buries an UnrecoverableError thrown inside the shutdown window", async () => {
@@ -552,7 +561,7 @@ describe("close", () => {
 
 		const failure = await runtime.close({ timeoutMs: 20 }).catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("recordingDriver")
+		expect(errorOf(failure).message).toContain("recordingDriver")
 		expect(cleared).toHaveBeenCalled()
 
 		cleared.mockRestore()

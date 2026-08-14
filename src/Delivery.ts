@@ -5,7 +5,7 @@ const KEEP_LAST_WINDOW_FIX =
 
 type UniqueMode = "keepFirst" | "keepLast" | "noOverlap"
 
-export interface Unique<Data = unknown> {
+interface Unique<Data = unknown> {
 	readonly key: (data: Data) => string
 	readonly mode: UniqueMode
 	readonly ttlMs?: number
@@ -26,7 +26,7 @@ export interface Delivery {
 	readonly unique?: ResolvedUnique
 }
 
-export type DeliveryOverrides<Data = unknown> = {
+type DeliveryOverrides<Data = unknown> = {
 	[Key in keyof Omit<Delivery, "unique">]?: Delivery[Key] | undefined
 } & { unique?: Unique<Data> | undefined }
 

@@ -27,4 +27,3 @@ The memory driver does not simulate the clock, delays, backoff, retries, priorit
 It accepts `attempts`, `backoff`, `priority`, `keepCompletedForMs` and `keepFailedCount`, but only `attempts` reaches your handler, as `maxAttempts`. `backoff` and `priority` are accepted and ignored. Per-queue `concurrency` is accepted and ignored too — jobs run inline, one at a time.
 
 Everything else throws, and that is the point. `delayMs`, `unique` and a queue `limiter` are time-dependent, so the memory driver refuses them instead of pretending. Enqueueing a definition that declares `awaits` throws for a related reason: jobs run inline, so a parent would run before its children — see [Flows](./flows.md). The error names the option and sends you to `redisDriver`, so a behaviour this driver never learns to simulate fails loudly instead of passing a test it would fail in production.
-

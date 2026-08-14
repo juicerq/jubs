@@ -4,15 +4,15 @@
 
 `delivery` on a definition says how the job is delivered: how many attempts it gets, how it backs off, how it is prioritised, how long its record is kept, and whether it waits before becoming available. It lives with the definition, so every enqueue of that job gets the same policy — no delivery options at the call site.
 
-| Option | Default | What it does |
-| --- | --- | --- |
-| `attempts` | `5` | How many attempts in total, the first one included |
-| `backoff` | `{ type: "exponential", delayMs: 2000 }` | Wait before a retry, doubling each attempt |
-| `priority` | `20` | Smaller runs first; leave room on both sides |
-| `keepCompletedForMs` | `3600000` | How long a completed job stays in Redis |
-| `keepFailedCount` | `200` | How many failed jobs stay in Redis |
-| `delayMs` | none | Wait this long before the job becomes available |
-| `unique` | none | Which job survives when several share a key — see below |
+| Option               | Default                                  | What it does                                            |
+| -------------------- | ---------------------------------------- | ------------------------------------------------------- |
+| `attempts`           | `5`                                      | How many attempts in total, the first one included      |
+| `backoff`            | `{ type: "exponential", delayMs: 2000 }` | Wait before a retry, doubling each attempt              |
+| `priority`           | `20`                                     | Smaller runs first; leave room on both sides            |
+| `keepCompletedForMs` | `3600000`                                | How long a completed job stays in Redis                 |
+| `keepFailedCount`    | `200`                                    | How many failed jobs stay in Redis                      |
+| `delayMs`            | none                                     | Wait this long before the job becomes available         |
+| `unique`             | none                                     | Which job survives when several share a key — see below |
 
 You override only what you name. Anything you leave out keeps its default.
 
@@ -40,7 +40,6 @@ export const sendReport = defineJob({
 ```
 
 `delayMs` is the one option the memory driver refuses, because a fake clock that resolves instantly would turn a delay into a green test and a production surprise. Test a delay against `redisDriver`.
-
 
 ## Per-queue tuning
 
@@ -139,4 +138,3 @@ process.once("SIGINT", shutdown)
 Set `timeoutMs` below your orchestrator's grace period, not above it. Kubernetes sends `SIGKILL` 30 seconds after `SIGTERM` by default, so 25 seconds leaves the process a few seconds to close its connections and exit on its own terms. A `close` that outlives the grace period is the same as no `close` at all.
 
 `memoryDriver` runs jobs inline on the caller's stack, so nothing is in flight while `close` runs and its abort path is never reached. `timeoutMs` on a definition still works there, and so does the held key a timed-out body keeps — test a deadline against the memory driver, and test a shutdown that cuts a running handler short against `redisDriver`.
-

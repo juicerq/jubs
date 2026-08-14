@@ -2,13 +2,13 @@
 
 Five operations act on work already in Redis. `get`, `retry` and `cancel` take a job id. `pause` and `resume` take a queue name.
 
-| Operation | What it does |
-| --- | --- |
-| `jobs.get(id)` | describes the job, or gives back `undefined` |
-| `jobs.retry(id)` | runs a failed job again, from attempt 1 |
-| `jobs.cancel(id)` | removes a job that has not started, or aborts the signal of one that runs |
-| `jobs.pause(queue)` | stops every worker on that queue from taking new jobs |
-| `jobs.resume(queue)` | lets them take jobs again |
+| Operation            | What it does                                                              |
+| -------------------- | ------------------------------------------------------------------------- |
+| `jobs.get(id)`       | describes the job, or gives back `undefined`                              |
+| `jobs.retry(id)`     | runs a failed job again, from attempt 1                                   |
+| `jobs.cancel(id)`    | removes a job that has not started, or aborts the signal of one that runs |
+| `jobs.pause(queue)`  | stops every worker on that queue from taking new jobs                     |
+| `jobs.resume(queue)` | lets them take jobs again                                                 |
 
 ### The id
 
@@ -58,9 +58,7 @@ console.log(snapshot.state, snapshot.attempts, snapshot.maxAttempts, snapshot.fa
 
 ```ts
 type RetryResult =
-	| { outcome: "retried" }
-	| { outcome: "unknown_job" }
-	| { outcome: "not_failed"; state: JobState }
+	{ outcome: "retried" } | { outcome: "unknown_job" } | { outcome: "not_failed"; state: JobState }
 
 type CancelResult =
 	| { outcome: "removed" }
@@ -132,12 +130,12 @@ if (retried.outcome === "not_failed") {
 
 `retry` and `dead.replay` are different operations on different objects, and the difference decides which one you can use.
 
-| | `jobs.retry(id)` | `jobs.dead.replay(id)` |
-| --- | --- | --- |
-| Acts on | the failed job itself, still in Redis | the copy kept in the dead queue |
-| Id | the live id, from `enqueue` or `context.id` | the dead id, from `dead.list(queue)` |
-| Result | the same job runs again, same id, attempt 1 | a **new** job is enqueued, new id, and the dead entry is dropped |
-| Needs | the job to be inside the `keepFailedCount` window | the definition registered in `createJobs({ definitions })` |
+|         | `jobs.retry(id)`                                  | `jobs.dead.replay(id)`                                           |
+| ------- | ------------------------------------------------- | ---------------------------------------------------------------- |
+| Acts on | the failed job itself, still in Redis             | the copy kept in the dead queue                                  |
+| Id      | the live id, from `enqueue` or `context.id`       | the dead id, from `dead.list(queue)`                             |
+| Result  | the same job runs again, same id, attempt 1       | a **new** job is enqueued, new id, and the dead entry is dropped |
+| Needs   | the job to be inside the `keepFailedCount` window | the definition registered in `createJobs({ definitions })`       |
 
 Retry the job while it is still there. Replay it once the failed window has rolled over it — which is the only reason the dead queue exists.
 
@@ -164,7 +162,6 @@ A pause stops **fetching**, not the jobs already fetched: what is active when yo
 `cancel` answers with what it knows: a job it has not run is `removed` and stops answering to `get`, a job that finished is `finished`, an unknown id is `unknown_job`, and a job it is running is marked and comes back as `aborting` — a real abort, because the sweep belongs to the runtime, not to a driver. A mark names its delivery here too, so one left behind kills no later delivery. It keeps no clock, so the 30 second expiry is ignored and a mark nobody collects never expires. Nor is there a race between reading a job's state and removing it, since jobs run inline on the caller's stack — so `removed` here really does mean the job never ran. Test the expiry, and a job that turns active under a cancellation, against `redisDriver`.
 
 `pause` and `resume` are simulated where this driver consumes. A paused queue holds its pending jobs back: `runNext` skips them and throws when every pending job sits on a paused queue, and `drain` runs the other queues and counts only what it ran.
-
 
 ## Hooks
 
@@ -210,14 +207,14 @@ Two checks guard the wiring. When you register `definitions`, `createJobs` refus
 
 What is kept is the envelope, the serialised error and one of six reasons.
 
-| Reason | What died |
-| --- | --- |
-| `attempts_exhausted` | the last attempt failed |
-| `unrecoverable` | the handler threw `UnrecoverableError` |
-| `version_ahead` | the payload was written by a newer deploy than this worker runs |
-| `cancelled` | `jobs.cancel(id)` reached the job while it ran — see [Operations](#operations) |
-| `child_dead` | a child of this job failed every attempt — see [Flows](./flows.md) |
-| `children_short` | a slot of this job holds fewer children than it was enqueued with — see [Flows](./flows.md) |
+| Reason               | What died                                                                                   |
+| -------------------- | ------------------------------------------------------------------------------------------- |
+| `attempts_exhausted` | the last attempt failed                                                                     |
+| `unrecoverable`      | the handler threw `UnrecoverableError`                                                      |
+| `version_ahead`      | the payload was written by a newer deploy than this worker runs                             |
+| `cancelled`          | `jobs.cancel(id)` reached the job while it ran — see [Operations](#operations)              |
+| `child_dead`         | a child of this job failed every attempt — see [Flows](./flows.md)                          |
+| `children_short`     | a slot of this job holds fewer children than it was enqueued with — see [Flows](./flows.md) |
 
 ```ts
 const dead = await jobs.dead.list("billing")
@@ -251,4 +248,3 @@ One narrow window belongs to the replay itself: it forgets the key and then enqu
 Writing to the dead queue never changes a job's outcome. If Redis refuses the write, jubs reports it on `console.error` and the job still fails the way it would have.
 
 `onDead` is separate, and fires whether or not a dead queue is configured. The hook is the page; the dead queue is the copy you replay from.
-

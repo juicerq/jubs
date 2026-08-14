@@ -59,4 +59,3 @@ The rule when a rollback is likely: keep the step, do not delete it. A migration
 `version` must be a whole number of `1` or more, and every migration key must be a whole number between `1` and `version - 1`. A step outside that range never runs, which is always a mistake — a typo, or a `version` you forgot to raise.
 
 The full chain is **not** required. A definition can jump to `version: 3` with only a step `2`, because a job raising its version with nothing old left in Redis should not have to write identity functions. The price is that the missing step is found at run time: a job stored at a version with no step from it fails unrecoverably and names the version it needed.
-

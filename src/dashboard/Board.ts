@@ -108,13 +108,11 @@ export function boardQueues(config: BoardConfig): readonly BoardQueue[] {
 }
 
 function isModuleMissing(error: unknown): boolean {
-	if (typeof error !== "object" || error === null) {
+	if (typeof error !== "object" || error === null || !("code" in error)) {
 		return false
 	}
 
-	const { code } = error as { code?: unknown }
-
-	return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND"
+	return error.code === "ERR_MODULE_NOT_FOUND" || error.code === "MODULE_NOT_FOUND"
 }
 
 /**

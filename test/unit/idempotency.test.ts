@@ -1,6 +1,9 @@
 import { describe, expect, jest, test } from "bun:test"
 import { type } from "arktype"
 import {
+	HELD_RETRY_FLOOR_MS,
+	HELD_RETRY_MS,
+	heldRetryDelayMs,
 	IDEMPOTENCY_LEASE_MS,
 	IDEMPOTENCY_MAX_RESULT_BYTES,
 	IDEMPOTENCY_RENEW_MS,
@@ -16,6 +19,7 @@ import {
 	PayloadError,
 } from "@/index"
 import { memoryDriver } from "@/testing/index"
+import { errorOf } from "../support/Failures"
 import { recordingDriver } from "./support/RecordingDriver"
 
 const chargeCard = defineJob({
@@ -201,7 +205,7 @@ describe("idempotency", () => {
 			.deliver("billing", deliveryOf("order-1"))
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toBe("the card processor is down")
+		expect(errorOf(failure).message).toBe("the card processor is down")
 		expect(driver.released).toEqual([keyOf("order-1")])
 		expect(driver.completed).toEqual([])
 	})
@@ -230,14 +234,13 @@ describe("idempotency", () => {
 			}),
 		])
 
-		driver.holdLease(keyOf("order-1"), 250)
+		driver.holdLease(keyOf("order-1"))
 
 		const signal = await driver
 			.deliver("billing", { ...deliveryOf("order-1"), attempt: 5, maxAttempts: 5 })
 			.catch((error: unknown) => error)
 
 		expect(signal).toBeInstanceOf(LeaseHeldError)
-		expect((signal as LeaseHeldError).delayMs).toBe(250)
 		expect(ran).toBe(0)
 		expect(failed).toEqual([])
 		expect(dead).toEqual([])
@@ -303,6 +306,16 @@ describe("idempotency", () => {
 
 		expect(await driver.drain()).toBe(2)
 		expect(charged).toEqual([500])
+	})
+
+	test("a held delivery waits a doubling cadence between the floor and the ceiling", () => {
+		expect(heldRetryDelayMs(1)).toBe(HELD_RETRY_FLOOR_MS)
+		expect(heldRetryDelayMs(2)).toBe(200)
+		expect(heldRetryDelayMs(3)).toBe(400)
+		expect(heldRetryDelayMs(4)).toBe(800)
+		expect(heldRetryDelayMs(5)).toBe(HELD_RETRY_MS)
+		expect(heldRetryDelayMs(6)).toBe(HELD_RETRY_MS)
+		expect(heldRetryDelayMs(400)).toBe(HELD_RETRY_MS)
 	})
 })
 
@@ -424,7 +437,7 @@ describe("idempotency under a handler timeout", () => {
 			.deliver("billing", deliveryOf("order-1"))
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain("timeoutMs")
+		expect(errorOf(failure).message).toContain("timeoutMs")
 		expect(driver.released).toEqual([])
 		expect(driver.completed).toEqual([])
 
@@ -475,7 +488,7 @@ describe("idempotency under a handler timeout", () => {
 
 		const refused = await driver.runNext().catch((error: unknown) => error)
 
-		expect((refused as Error).message).toContain("idempotency lease is held")
+		expect(errorOf(refused).message).toContain("idempotency lease is held")
 		expect(bodies).toHaveLength(1)
 	})
 })

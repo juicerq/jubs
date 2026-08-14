@@ -6,6 +6,7 @@ import { deadQueueName } from "@/Dead"
 import { createJobs, defineHandler, defineJob, redisDriver } from "@/index"
 import { composeJobId } from "@/JobId"
 import { CANCEL_KEY_PREFIX, IDEMPOTENCY_KEY_PREFIX } from "@/RedisDriver"
+import { errorOf } from "../support/Failures"
 import { liveId } from "../support/JobIds"
 import { waitFor, waitForFinished } from "../support/Wait"
 import { scoped, storedId } from "./namespace"
@@ -359,8 +360,8 @@ describe("a flow over redis", () => {
 			.enqueue(sendInvoice, { id: "inv-1" }, { reconcile: { id: "inv-1" } })
 			.catch((error: unknown) => error)
 
-		expect((failure as Error).message).toContain(reconcileOnce.name)
-		expect((failure as Error).message).toContain("uniqueness does not apply inside a flow")
+		expect(errorOf(failure).message).toContain(reconcileOnce.name)
+		expect(errorOf(failure).message).toContain("uniqueness does not apply inside a flow")
 		expect(await parents.getJobCounts()).toMatchObject(EMPTY_COUNTS)
 		expect(await children.getJobCounts()).toMatchObject(EMPTY_COUNTS)
 	}, 30_000)
@@ -531,8 +532,8 @@ describe("a child that fails every attempt over redis", () => {
 			defineHandler(readLeaf, async () => {
 				throw new Error("the ledger is closed")
 			}),
-			defineHandler(sumMid, async () => undefined),
-			defineHandler(closeTop, async () => undefined),
+			defineHandler(sumMid, async () => {}),
+			defineHandler(closeTop, async () => {}),
 		])
 
 		const enqueued = await jobs.enqueue(
@@ -593,7 +594,7 @@ describe("a child that fails every attempt over redis", () => {
 
 				return { url: "not a url" }
 			}),
-			defineHandler(sendInvoice, async () => undefined),
+			defineHandler(sendInvoice, async () => {}),
 		])
 
 		await jobs.enqueue(sendInvoice, { id: "inv-1" }, { render: { id: "inv-1" } })
@@ -714,7 +715,7 @@ describe("a child swept by removeOnComplete over redis", () => {
 
 				return { rows: 2 }
 			}),
-			defineHandler(sweepAlong, async () => undefined),
+			defineHandler(sweepAlong, async () => {}),
 			defineHandler(closeTop, async (_data, context) => {
 				closed.resolve({ fast: context.children.fast, slow: context.children.slow })
 			}),
@@ -1072,10 +1073,10 @@ describe("a buried flow job over redis", () => {
 
 		const refusal = await jobs.dead.replay(parentEntry?.id ?? "").catch((error: unknown) => error)
 
-		expect((refusal as Error).message).toContain(sendInvoice.name)
-		expect((refusal as Error).message).toContain("part of a flow")
-		expect((refusal as Error).message).toContain("jobs.retry")
-		expect((refusal as Error).message).toContain("jobs.dead.discard")
+		expect(errorOf(refusal).message).toContain(sendInvoice.name)
+		expect(errorOf(refusal).message).toContain("part of a flow")
+		expect(errorOf(refusal).message).toContain("jobs.retry")
+		expect(errorOf(refusal).message).toContain("jobs.dead.discard")
 		expect(await jobs.dead.list(flowQueue)).toHaveLength(2)
 		expect(await live.getJobCounts()).toEqual(before)
 		expect(sent).toEqual([])

@@ -119,12 +119,12 @@ Every name comes out once. Many definitions share one queue, and registering a n
 
 A job's `data` on the board is the jubs envelope, not your payload. `v` is the payload version, `name` is the job name, `data` is the payload itself, and `origin` says what caused the job to exist.
 
-| `origin` | What made the job |
-| --- | --- |
-| `direct` | an enqueue somebody made |
-| `schedule` | one occurrence of a [schedule](./scheduling.md) |
-| `flow` | a node of a [flow](./flows.md) |
-| `relay` | a row the [outbox relay](./outbox.md#outbox-and-relay) delivered |
+| `origin`   | What made the job                                                |
+| ---------- | ---------------------------------------------------------------- |
+| `direct`   | an enqueue somebody made                                         |
+| `schedule` | one occurrence of a [schedule](./scheduling.md)                  |
+| `flow`     | a node of a [flow](./flows.md)                                   |
+| `relay`    | a row the [outbox relay](./outbox.md#outbox-and-relay) delivered |
 
 `origin` is how a scheduled run is told apart from a hand-made one on the screen. The two run the same handler on the same queue and look alike everywhere else — the envelope is the only place that difference was written down, and it is the same field `context.origin` reads inside the handler.
 
@@ -157,4 +157,3 @@ await expressDashboard({
 What comes back with them is the pair above, so a writable queue is described on the screen as writable and names both hazards there. Everything else the board offers — retrying a failed job, promoting a delayed one, pausing the queue — acts on Redis exactly as `jobs.retry` and `jobs.pause` do, and jubs treats the board as it treats any other operator.
 
 **A dead queue ignores `readOnly` entirely.** `<queue>.dead` is read only whatever you pass, because every action the board offers over a burial is wrong: nothing consumes the queue, so a retry never runs, and a clean or an empty destroys the very record the queue exists to keep. The way back is `jobs.dead.replay(id)`, which enqueues the job again from the stored envelope and then drops the entry, or `jobs.dead.discard(id)`, which drops it without enqueueing — see [Dead queue](./operations.md#dead-queue).
-

@@ -33,7 +33,7 @@ export class EnvelopeError extends Error {
 }
 
 function isOrigin(value: unknown): value is Origin {
-	return ORIGINS.includes(value as Origin)
+	return ORIGINS.some((origin) => origin === value)
 }
 
 /**
@@ -53,17 +53,20 @@ function readSlots(stored: unknown): Readonly<Record<string, number>> | undefine
 		throw new EnvelopeError(`its child counts ${JSON.stringify(stored)} are not an object`)
 	}
 
-	const counts = Object.entries(stored as Record<string, unknown>)
+	const counts: [string, unknown][] = Object.entries(stored)
+	const whole: Record<string, number> = {}
 
-	const stray = counts.find(([, count]) => typeof count !== "number" || !Number.isInteger(count))
+	for (const [slot, count] of counts) {
+		if (typeof count !== "number" || !Number.isInteger(count)) {
+			throw new EnvelopeError(
+				`its child count for the slot "${slot}" is ${JSON.stringify(count)}, which is not a whole number of children`,
+			)
+		}
 
-	if (stray) {
-		throw new EnvelopeError(
-			`its child count for the slot "${stray[0]}" is ${JSON.stringify(stray[1])}, which is not a whole number of children`,
-		)
+		whole[slot] = count
 	}
 
-	return Object.fromEntries(counts) as Readonly<Record<string, number>>
+	return whole
 }
 
 export function readEnvelope(stored: unknown): Envelope {
@@ -71,28 +74,32 @@ export function readEnvelope(stored: unknown): Envelope {
 		throw new EnvelopeError(`expected an object, got ${typeof stored}`)
 	}
 
-	const envelope = stored as Partial<Envelope>
+	const v: unknown = Reflect.get(stored, "v")
+	const name: unknown = Reflect.get(stored, "name")
+	const data: unknown = Reflect.get(stored, "data")
+	const origin: unknown = Reflect.get(stored, "origin")
+	const rawSlots: unknown = Reflect.get(stored, "slots")
 
-	if (typeof envelope.v !== "number") {
+	if (typeof v !== "number") {
 		throw new EnvelopeError("its payload version `v` is missing")
 	}
 
-	if (typeof envelope.name !== "string" || envelope.name.length === 0) {
+	if (typeof name !== "string" || name.length === 0) {
 		throw new EnvelopeError("its job name is missing")
 	}
 
-	if (!isOrigin(envelope.origin)) {
-		throw new EnvelopeError(`its origin ${JSON.stringify(envelope.origin)} is not a known origin`)
+	if (!isOrigin(origin)) {
+		throw new EnvelopeError(`its origin ${JSON.stringify(origin)} is not a known origin`)
 	}
 
 	const read: Envelope = {
-		v: envelope.v,
-		name: envelope.name,
-		data: envelope.data,
-		origin: envelope.origin,
+		v,
+		name,
+		data,
+		origin,
 	}
 
-	const slots = readSlots(envelope.slots)
+	const slots = readSlots(rawSlots)
 
 	if (!slots) {
 		return read
