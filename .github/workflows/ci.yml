@@ -38,9 +38,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - label: node current
+          - label: node 26
             runtime: node
-            node-version: current
+            node-version: "26.13.0"
             bun-version: 1.4.4
           - label: bun 1.2
             runtime: bun
