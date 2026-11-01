@@ -8,7 +8,7 @@ const config: UserConfig = defineConfig({
 	},
 	format: "esm",
 	platform: "node",
-	target: "node20",
+	target: "node22",
 	fixedExtension: false,
 	dts: true,
 	exports: false,
